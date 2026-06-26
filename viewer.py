@@ -38,11 +38,13 @@ CLUSTER_CMAP = {
 }
 
 
-def load_nifti_canonical(path: str) -> np.ndarray:
-    """Load a NIfTI file and reorient to canonical RAS orientation.
+def load_vol(path: str) -> np.ndarray:
+    """Load a NIfTI file and reorient to canonical RAS.
 
     After reorientation the array axes are (x, y, z) = (L-R, P-A, I-S),
-    so slicing ``data[:, :, z]`` gives a proper axial slice.
+    so ``data[:, :, z]`` gives an axial slice.
+    All data from the same pipeline share the same affine, so canonical
+    reorientation is consistent across volumes.
     """
     img = nib.load(path)
     canonical = nib.as_closest_canonical(img)
@@ -134,55 +136,49 @@ class FETViewer:
             sys.exit(1)
 
         # ── Load volumes (all reoriented to canonical RAS) ──
-        print("Loading data (canonical RAS orientation)...")
+        print("Loading data (canonical RAS)...")
 
         # Always load TBR volumes first (curves need them)
         if self.mode == "static":
             tbrs = []
             for key in ["map_tbr_t20.nii.gz", "map_tbr_t40.nii.gz", "map_tbr_t60.nii.gz"]:
-                tbrs.append(load_nifti_canonical(self.files[key]))
-            self.tbr_volumes = np.stack(tbrs, axis=-1)  # (nx, ny, nz, 3)
+                tbrs.append(load_vol(self.files[key]))
+            self.tbr_volumes = np.stack(tbrs, axis=-1)
 
         # Underlay: T1 if available, otherwise mean TBR / TBRmax
         self.has_t1 = "map_t1.nii.gz" in self.files
         if self.has_t1:
-            self.underlay = load_nifti_canonical(self.files["map_t1.nii.gz"])
+            self.underlay = load_vol(self.files["map_t1.nii.gz"])
             self.underlay_label = "T1"
         elif self.mode == "dynamic":
-            self.underlay = load_nifti_canonical(self.files["map_tbrmax.nii.gz"])
+            self.underlay = load_vol(self.files["map_tbrmax.nii.gz"])
             self.underlay_label = "TBRmax"
         else:
             self.underlay = np.mean(self.tbr_volumes, axis=-1)
             self.underlay_label = "TBR mean"
 
-        self.clusters = load_nifti_canonical(
+        self.clusters = load_vol(
             self.files["mask_clusters.nii.gz"]
         ).astype(np.int8)
-
-        # Optional brain mask
-        self.brain_mask = None
-        if "mask_brain.nii.gz" in self.files:
-            self.brain_mask = load_nifti_canonical(
-                self.files["mask_brain.nii.gz"]
-            ).astype(bool)
 
         # ── Shape ──
         self.shape = self.underlay.shape
         self.nx, self.ny, self.nz = self.shape
-        print(f"  Underlay shape: {self.shape}  ({self.underlay_label})")
-        print(f"  Clusters shape: {self.clusters.shape}")
+        print(f"  Underlay: {self.shape}  ({self.underlay_label})")
+        print(f"  Clusters: {self.clusters.shape}")
         if self.mode == "static":
-            print(f"  TBR volumes shape: {self.tbr_volumes.shape}")
-        # Sanity check
+            print(f"  TBR vols: {self.tbr_volumes.shape}")
+
+        # Sanity checks
         if self.mode == "static" and self.tbr_volumes.shape[:3] != self.shape:
-            print(f"  WARNING: underlay shape {self.shape} != TBR shape {self.tbr_volumes.shape[:3]}")
+            print(f"  WARNING: TBR shape {self.tbr_volumes.shape[:3]} != underlay {self.shape}")
         if self.clusters.shape != self.shape:
-            print(f"  WARNING: underlay shape {self.shape} != clusters shape {self.clusters.shape}")
+            print(f"  WARNING: clusters shape {self.clusters.shape} != underlay {self.shape}")
 
         # ── Build RGBA overlay ──
         self.overlay = build_rgba_overlay(self.clusters, CLUSTER_CMAP)
 
-        # ── Current slice index (axial = z-axis = 3rd dim) ──
+        # ── Current slice (axial = axis 2 in canonical RAS) ──
         self.cur_z = self.nz // 2
 
         # ── Setup figure ──
@@ -190,9 +186,9 @@ class FETViewer:
         self.fig = plt.figure(title, figsize=(14, 7))
         self.fig.canvas.manager.set_window_title(title)
 
-        # Left: axial slice  (data[:, :, z] — first dim = x, second = y)
+        # Left: axial slice  (imshow: x=axis1, y=axis0)
         self.ax_img = self.fig.add_axes([0.05, 0.1, 0.50, 0.80])
-        self.ax_img.set_title("Axial slice (click for TBR curve)")
+        self.ax_img.set_title("Axial slice  (click for TBR curve)")
         self.img_display = None
         self.overlay_display = None
 
@@ -240,7 +236,6 @@ class FETViewer:
             )
             self.ax_legend.text(x0 + 0.05, 0.5, name, va="center", fontsize=10)
 
-        # ── Underlay label ──
         self.ax_legend.text(0.62, 0.5, f"Underlay: {self.underlay_label}",
                             va="center", fontsize=9, color="gray")
 
@@ -255,29 +250,20 @@ class FETViewer:
 
     # ── Drawing ──────────────────────────────────────────────────────────
 
-    def _display_to_voxel(self, dx: int, dy: int) -> tuple[int, int, int]:
-        """Convert display pixel coords (from click/hover) to voxel indices.
-
-        Displayed slice is np.rot90(raw[:, :, z], k=3) so the mapping is:
-            rotated[dy, dx] = original[dx, ny-1-dy]
-            voxel_x = dx
-            voxel_y = ny - 1 - dy
-            voxel_z = cur_z
-        """
-        x = dx
-        y = self.ny - 1 - dy
-        return x, y, self.cur_z
-
     def _draw_slice(self):
-        """Redraw the axial slice at cur_z."""
+        """Redraw the axial slice at cur_z (transposed for display)."""
         self.ax_img.clear()
         self.ax_img.set_title(
             f"Axial slice  z={self.cur_z}/{self.nz - 1}  "
             f"[{self.underlay_label}]  (click for TBR curve)"
         )
 
-        # Underlay: axial slice, rotated for anatomical orientation
-        under = np.rot90(self.underlay[:, :, self.cur_z], k=3)
+        # Raw slice: data[:, :, z] → shape (nx, ny)
+        #   axis 0 = x = L-R, axis 1 = y = P-A
+        # Transpose for display: (ny, nx) so imshow maps:
+        #   x-axis = columns = x (L-R), y-axis = rows = y (P-A)
+        # With origin="lower": bottom=posterior, top=anterior ✓
+        under = self.underlay[:, :, self.cur_z].T
         vmin = np.percentile(under[under > 0], 2) if np.any(under > 0) else 0
         vmax = np.percentile(under[under > 0], 98) if np.any(under > 0) else under.max()
         if vmax <= vmin:
@@ -288,14 +274,14 @@ class FETViewer:
             origin="lower", aspect="equal"
         )
 
-        # Overlay: same rotation
-        ov = np.rot90(self.overlay[:, :, self.cur_z, :], k=3)
+        # Overlay: same transpose
+        ov = self.overlay[:, :, self.cur_z, :].transpose(1, 0, 2)
         self.overlay_display = self.ax_img.imshow(
             ov, origin="lower", aspect="equal"
         )
 
-        self.ax_img.set_xlabel("X")
-        self.ax_img.set_ylabel("Y")
+        self.ax_img.set_xlabel("X (L-R)")
+        self.ax_img.set_ylabel("Y (P-A)")
         self.fig.canvas.draw_idle()
 
     def _update_curve(self, x: int, y: int, z: int):
@@ -306,7 +292,6 @@ class FETViewer:
         if not (0 <= x < self.nx and 0 <= y < self.ny and 0 <= z < self.nz):
             return
 
-        # TBR values at (x, y, z) across 3 time points
         tbr_vals = self.tbr_volumes[x, y, z, :]
         cluster = self.clusters[x, y, z]
 
@@ -322,11 +307,8 @@ class FETViewer:
         self.fig.canvas.draw_idle()
 
     def _draw_crosshair(self, x: int, y: int):
-        """Draw a crosshair at the clicked position, removing old one."""
-        # Remove old crosshair lines
-        to_remove = []
-        for artist in self.ax_img.lines + self.ax_img.patches:
-            to_remove.append(artist)
+        """Draw a crosshair at the clicked display position."""
+        to_remove = list(self.ax_img.lines) + list(self.ax_img.patches)
         for artist in to_remove:
             artist.remove()
 
@@ -364,19 +346,27 @@ class FETViewer:
         if event.xdata is None or event.ydata is None:
             return
 
+        # With canonical RAS and .T display:
+        #   under.T[row, col] = data[col, row, z] where col=x, row=y
+        #   imshow: x-axis=col (columns), y-axis=row (rows)
+        #   So: voxel_x = xdata, voxel_y = ydata, voxel_z = cur_z
         dx = int(round(event.xdata))
         dy = int(round(event.ydata))
-        vx, vy, vz = self._display_to_voxel(dx, dy)
-        print(f"  Click: display=({dx}, {dy}) -> voxel=({vx}, {vy}, {vz})  "
-              f"nx={self.nx} ny={self.ny} nz={self.nz}")
-        if not (0 <= vx < self.nx and 0 <= vy < self.ny and 0 <= vz < self.nz):
-            print(f"  -> OUT OF BOUNDS, skipping")
+        vx, vy, vz = dx, dy, self.cur_z
+
+        print(f"  Click: display=({dx},{dy}) -> voxel=({vx},{vy},{vz})  "
+              f"nx={self.nx} ny={self.ny}")
+
+        if not (0 <= vx < self.nx and 0 <= vy < self.ny):
+            print("  -> OUT OF BOUNDS")
             return
-        cluster = self.clusters[vx, vy, vz]
+
+        cluster = int(self.clusters[vx, vy, vz])
         print(f"  -> cluster={cluster}")
         if self.has_curves:
             tbr_vals = self.tbr_volumes[vx, vy, vz, :]
-            print(f"  -> TBR={tbr_vals}")
+            print(f"  -> TBR=({tbr_vals[0]:.4f}, {tbr_vals[1]:.4f}, {tbr_vals[2]:.4f})")
+
         self._draw_crosshair(dx, dy)
         self._update_curve(vx, vy, vz)
 
@@ -386,13 +376,13 @@ class FETViewer:
             return
         if event.xdata is not None and event.ydata is not None:
             dx, dy = int(round(event.xdata)), int(round(event.ydata))
-            vx, vy, vz = self._display_to_voxel(dx, dy)
+            vx, vy = dx, dy
             if 0 <= vx < self.nx and 0 <= vy < self.ny:
-                val = self.underlay[vx, vy, vz]
-                cls = self.clusters[vx, vy, vz]
-                label = {1: "R", 2: "F", 3: "P", 0: "-"}.get(cls, "?")
+                val = self.underlay[vx, vy, self.cur_z]
+                cls = self.clusters[vx, vy, self.cur_z]
+                label = {1: "R", 2: "F", 3: "P", 0: "-"}.get(int(cls), "?")
                 self.fig.canvas.manager.set_window_title(
-                    f"FET Viewer  |  ({vx}, {vy}, {vz})  "
+                    f"FET Viewer  |  ({vx}, {vy}, {self.cur_z})  "
                     f"val={val:.3f}  cluster={label}"
                 )
 
