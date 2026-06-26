@@ -263,7 +263,8 @@ class FETViewer:
         # Transpose for display: (ny, nx) so imshow maps:
         #   x-axis = columns = x (L-R), y-axis = rows = y (P-A)
         # With origin="lower": bottom=posterior, top=anterior ✓
-        under = self.underlay[:, :, self.cur_z].T
+        # Underlay: axial slice, transposed, then flipped L-R (radiological convention)
+        under = np.fliplr(self.underlay[:, :, self.cur_z].T)
         vmin = np.percentile(under[under > 0], 2) if np.any(under > 0) else 0
         vmax = np.percentile(under[under > 0], 98) if np.any(under > 0) else under.max()
         if vmax <= vmin:
@@ -275,12 +276,13 @@ class FETViewer:
         )
 
         # Overlay: same transpose
-        ov = self.overlay[:, :, self.cur_z, :].transpose(1, 0, 2)
+        # Overlay: same transpose + flip
+        ov = np.fliplr(self.overlay[:, :, self.cur_z, :].transpose(1, 0, 2))
         self.overlay_display = self.ax_img.imshow(
             ov, origin="lower", aspect="equal"
         )
 
-        self.ax_img.set_xlabel("X (L-R)")
+        self.ax_img.set_xlabel("X (R-L)")
         self.ax_img.set_ylabel("Y (P-A)")
         self.fig.canvas.draw_idle()
 
@@ -346,13 +348,12 @@ class FETViewer:
         if event.xdata is None or event.ydata is None:
             return
 
-        # With canonical RAS and .T display:
-        #   under.T[row, col] = data[col, row, z] where col=x, row=y
-        #   imshow: x-axis=col (columns), y-axis=row (rows)
-        #   So: voxel_x = xdata, voxel_y = ydata, voxel_z = cur_z
+        # With canonical RAS, .T display, and fliplr (radiological):
+        #   flipped[row, col] = data[nx-1-col, row, z]
+        #   voxel_x = nx - 1 - xdata, voxel_y = ydata, voxel_z = cur_z
         dx = int(round(event.xdata))
         dy = int(round(event.ydata))
-        vx, vy, vz = dx, dy, self.cur_z
+        vx, vy, vz = self.nx - 1 - dx, dy, self.cur_z
 
         print(f"  Click: display=({dx},{dy}) -> voxel=({vx},{vy},{vz})  "
               f"nx={self.nx} ny={self.ny}")
@@ -376,7 +377,7 @@ class FETViewer:
             return
         if event.xdata is not None and event.ydata is not None:
             dx, dy = int(round(event.xdata)), int(round(event.ydata))
-            vx, vy = dx, dy
+            vx, vy = self.nx - 1 - dx, dy
             if 0 <= vx < self.nx and 0 <= vy < self.ny:
                 val = self.underlay[vx, vy, self.cur_z]
                 cls = self.clusters[vx, vy, self.cur_z]
