@@ -169,6 +169,15 @@ class FETViewer:
         # ── Shape ──
         self.shape = self.underlay.shape
         self.nx, self.ny, self.nz = self.shape
+        print(f"  Underlay shape: {self.shape}  ({self.underlay_label})")
+        print(f"  Clusters shape: {self.clusters.shape}")
+        if self.mode == "static":
+            print(f"  TBR volumes shape: {self.tbr_volumes.shape}")
+        # Sanity check
+        if self.mode == "static" and self.tbr_volumes.shape[:3] != self.shape:
+            print(f"  WARNING: underlay shape {self.shape} != TBR shape {self.tbr_volumes.shape[:3]}")
+        if self.clusters.shape != self.shape:
+            print(f"  WARNING: underlay shape {self.shape} != clusters shape {self.clusters.shape}")
 
         # ── Build RGBA overlay ──
         self.overlay = build_rgba_overlay(self.clusters, CLUSTER_CMAP)
@@ -357,8 +366,18 @@ class FETViewer:
 
         dx = int(round(event.xdata))
         dy = int(round(event.ydata))
-        self._draw_crosshair(dx, dy)
         vx, vy, vz = self._display_to_voxel(dx, dy)
+        print(f"  Click: display=({dx}, {dy}) -> voxel=({vx}, {vy}, {vz})  "
+              f"nx={self.nx} ny={self.ny} nz={self.nz}")
+        if not (0 <= vx < self.nx and 0 <= vy < self.ny and 0 <= vz < self.nz):
+            print(f"  -> OUT OF BOUNDS, skipping")
+            return
+        cluster = self.clusters[vx, vy, vz]
+        print(f"  -> cluster={cluster}")
+        if self.has_curves:
+            tbr_vals = self.tbr_volumes[vx, vy, vz, :]
+            print(f"  -> TBR={tbr_vals}")
+        self._draw_crosshair(dx, dy)
         self._update_curve(vx, vy, vz)
 
     def on_hover(self, event):
