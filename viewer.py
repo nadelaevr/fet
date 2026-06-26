@@ -136,6 +136,13 @@ class FETViewer:
         # ── Load volumes (all reoriented to canonical RAS) ──
         print("Loading data (canonical RAS orientation)...")
 
+        # Always load TBR volumes first (curves need them)
+        if self.mode == "static":
+            tbrs = []
+            for key in ["map_tbr_t20.nii.gz", "map_tbr_t40.nii.gz", "map_tbr_t60.nii.gz"]:
+                tbrs.append(load_nifti_canonical(self.files[key]))
+            self.tbr_volumes = np.stack(tbrs, axis=-1)  # (nx, ny, nz, 3)
+
         # Underlay: T1 if available, otherwise mean TBR / TBRmax
         self.has_t1 = "map_t1.nii.gz" in self.files
         if self.has_t1:
@@ -145,10 +152,6 @@ class FETViewer:
             self.underlay = load_nifti_canonical(self.files["map_tbrmax.nii.gz"])
             self.underlay_label = "TBRmax"
         else:
-            tbrs = []
-            for key in ["map_tbr_t20.nii.gz", "map_tbr_t40.nii.gz", "map_tbr_t60.nii.gz"]:
-                tbrs.append(load_nifti_canonical(self.files[key]))
-            self.tbr_volumes = np.stack(tbrs, axis=-1)  # (nx, ny, nz, 3)
             self.underlay = np.mean(self.tbr_volumes, axis=-1)
             self.underlay_label = "TBR mean"
 
@@ -243,6 +246,18 @@ class FETViewer:
 
     # ── Drawing ──────────────────────────────────────────────────────────
 
+    def _display_to_voxel(self, dx: int, dy: int) -> tuple[int, int, int]:
+        """Convert display pixel coords (from click/hover) to voxel indices.
+
+        Displayed slice is np.rot90(raw[:, :, z], k=1) so the mapping is:
+            voxel_x = nx - 1 - display_y
+            voxel_y = display_x
+            voxel_z = cur_z
+        """
+        x = self.nx - 1 - dy
+        y = dx
+        return x, y, self.cur_z
+
     def _draw_slice(self):
         """Redraw the axial slice at cur_z."""
         self.ax_img.clear()
@@ -251,8 +266,8 @@ class FETViewer:
             f"[{self.underlay_label}]  (click for TBR curve)"
         )
 
-        # Underlay: axial slice = data[:, :, z] -> shape (nx, ny)
-        under = self.underlay[:, :, self.cur_z]
+        # Underlay: axial slice, rotated CCW for anatomical orientation
+        under = np.rot90(self.underlay[:, :, self.cur_z], k=1)
         vmin = np.percentile(under[under > 0], 2) if np.any(under > 0) else 0
         vmax = np.percentile(under[under > 0], 98) if np.any(under > 0) else under.max()
         if vmax <= vmin:
@@ -263,14 +278,14 @@ class FETViewer:
             origin="lower", aspect="equal"
         )
 
-        # Overlay: same axial slice -> (nx, ny, 4)
-        ov = self.overlay[:, :, self.cur_z, :]
+        # Overlay: same rotation
+        ov = np.rot90(self.overlay[:, :, self.cur_z, :], k=1)
         self.overlay_display = self.ax_img.imshow(
             ov, origin="lower", aspect="equal"
         )
 
-        self.ax_img.set_xlabel(f"X (L-R, {self.nx})")
-        self.ax_img.set_ylabel(f"Y (P-A, {self.ny})")
+        self.ax_img.set_xlabel("X")
+        self.ax_img.set_ylabel("Y")
         self.fig.canvas.draw_idle()
 
     def _update_curve(self, x: int, y: int, z: int):
@@ -339,23 +354,25 @@ class FETViewer:
         if event.xdata is None or event.ydata is None:
             return
 
-        x = int(round(event.xdata))
-        y = int(round(event.ydata))
-        self._draw_crosshair(x, y)
-        self._update_curve(x, y, self.cur_z)
+        dx = int(round(event.xdata))
+        dy = int(round(event.ydata))
+        self._draw_crosshair(dx, dy)
+        vx, vy, vz = self._display_to_voxel(dx, dy)
+        self._update_curve(vx, vy, vz)
 
     def on_hover(self, event):
         """Show voxel info in status bar."""
         if not hasattr(self, "ax_img") or event.inaxes != self.ax_img:
             return
         if event.xdata is not None and event.ydata is not None:
-            x, y = int(round(event.xdata)), int(round(event.ydata))
-            if 0 <= x < self.nx and 0 <= y < self.ny:
-                val = self.underlay[x, y, self.cur_z]
-                cls = self.clusters[x, y, self.cur_z]
+            dx, dy = int(round(event.xdata)), int(round(event.ydata))
+            vx, vy, vz = self._display_to_voxel(dx, dy)
+            if 0 <= vx < self.nx and 0 <= vy < self.ny:
+                val = self.underlay[vx, vy, vz]
+                cls = self.clusters[vx, vy, vz]
                 label = {1: "R", 2: "F", 3: "P", 0: "-"}.get(cls, "?")
                 self.fig.canvas.manager.set_window_title(
-                    f"FET Viewer  |  ({x}, {y}, {self.cur_z})  "
+                    f"FET Viewer  |  ({vx}, {vy}, {vz})  "
                     f"val={val:.3f}  cluster={label}"
                 )
 
