@@ -37,6 +37,7 @@ from analysis import (
     compute_sulmax,
     compute_tbrmax,
     build_significant_mask,
+    filter_small_clusters,
 )
 from analysis_dynamic import (
     compute_tbr_4d,
@@ -80,6 +81,11 @@ def parse_args():
     parser.add_argument("--time-points", type=float, nargs=3,
                         default=[20.0, 40.0, 60.0])
     parser.add_argument("--trim-percent", type=float, default=2.5)
+
+    # Cluster filtering
+    parser.add_argument("--min-cluster-size", type=int, default=45,
+                        help="Minimum voxels per connected cluster "
+                             "(default: 45, set 0 to disable)")
 
     # Preprocessing
     parser.add_argument("--no-skull-strip", action="store_true",
@@ -198,6 +204,7 @@ def run_static(args):
             "time_span_min": args.time_span,
             "time_points_min": args.time_points,
             "trim_percent": args.trim_percent,
+            "min_cluster_size": args.min_cluster_size,
             "skull_strip": not args.no_skull_strip,
             "t1_used": args.t1 is not None,
             "smoothing": not args.no_smoothing,
@@ -255,6 +262,14 @@ def run_static(args):
     classes = classify_curves(slope_map, args.tbr_delta_threshold, args.time_span)
     mask_clusters = np.zeros_like(classes, dtype=np.int8)
     mask_clusters[sig_mask] = classes[sig_mask]
+
+    # Filter small clusters
+    if args.min_cluster_size > 0:
+        mask_clusters_raw = mask_clusters.copy()
+        mask_clusters = filter_small_clusters(mask_clusters, args.min_cluster_size)
+        n_removed = int(np.sum(mask_clusters_raw != 0)) - int(np.sum(mask_clusters != 0))
+        if n_removed > 0:
+            print(f"  Cluster filter (min {args.min_cluster_size} voxels): removed {n_removed} voxels")
 
     mask_tbr_gt2_t20 = (tbr_t20 > args.tbr_threshold).astype(np.uint8)
     mask_tbr_gt2_t40 = (tbr_t40 > args.tbr_threshold).astype(np.uint8)
@@ -450,6 +465,14 @@ def run_dynamic(args):
     mask_clusters = np.zeros_like(classes, dtype=np.int8)
     mask_clusters[sig_mask] = classes[sig_mask]
 
+    # Filter small clusters
+    if args.min_cluster_size > 0:
+        mask_clusters_raw = mask_clusters.copy()
+        mask_clusters = filter_small_clusters(mask_clusters, args.min_cluster_size)
+        n_removed = int(np.sum(mask_clusters_raw != 0)) - int(np.sum(mask_clusters != 0))
+        if n_removed > 0:
+            print(f"  Cluster filter (min {args.min_cluster_size} voxels): removed {n_removed} voxels")
+
     # Slope map: full, no masking
     slope_map_display = slope_map
 
@@ -472,6 +495,7 @@ def run_dynamic(args):
             "time_span_min": round(time_span_min, 2),
             "time_span_sec": round(time_points_sec[-1] - time_points_sec[0], 1),
             "trim_percent": args.trim_percent,
+            "min_cluster_size": args.min_cluster_size,
             "skull_strip": not args.no_skull_strip,
             "t1_used": args.t1 is not None,
             "smoothing": not args.no_smoothing,

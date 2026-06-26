@@ -181,6 +181,11 @@ python run_pipeline.py --dynamic \
   --no-skull-strip          Отключить skull-stripping
   --no-smoothing            Отключить сглаживание
   --smooth-sigma FLOAT      Сигма Гауссова сглаживания в вокселях (default: 1.0)
+
+Фильтрация кластеров:
+  --min-cluster-size INT    Минимальный размер connected component в вокселях
+                            (default: 45). Кластеры меньшего размера удаляются.
+                            0 = отключить фильтр.
 ```
 
 ---

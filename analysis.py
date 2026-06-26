@@ -4,6 +4,7 @@ Core analysis: trimmed mean, TBR computation, slope, curve classification.
 
 import numpy as np
 from typing import Tuple
+from scipy.ndimage import label, generate_binary_structure
 
 
 def trimmed_mean_with_ci(
@@ -240,3 +241,44 @@ def build_significant_mask(
     sul_ok = sulmax > sul_threshold
     tbr_any_ok = (tbr_t20 > tbr_threshold) | (tbr_t40 > tbr_threshold) | (tbr_t60 > tbr_threshold)
     return sul_ok & tbr_any_ok
+
+
+def filter_small_clusters(
+    mask_clusters: np.ndarray,
+    min_cluster_size: int = 45,
+    connectivity: int = 2,
+) -> np.ndarray:
+    """
+    Remove connected components smaller than min_cluster_size from cluster mask.
+
+    Processes each class (1=rising, 2=falling, 3=plateau) independently,
+    so a small rising region adjacent to a plateau is removed on its own.
+
+    Args:
+        mask_clusters: 3D int8 array (0=background, 1=rising, 2=falling, 3=plateau)
+        min_cluster_size: minimum voxels per connected component (default 45)
+        connectivity: voxel connectivity (2=face+edge, 3=face+edge+corner)
+
+    Returns:
+        filtered: same shape as mask_clusters, small components set to 0
+    """
+    if min_cluster_size <= 0:
+        return mask_clusters
+
+    struct = generate_binary_structure(3, connectivity)
+    filtered = np.zeros_like(mask_clusters)
+
+    for cls_label in [1, 2, 3]:
+        binary = mask_clusters == cls_label
+        if not np.any(binary):
+            continue
+
+        labeled, n_features = label(binary, structure=struct)
+        component_sizes = np.bincount(labeled.ravel())
+
+        # component_sizes[0] is background — skip
+        for feat_id in range(1, n_features + 1):
+            if component_sizes[feat_id] >= min_cluster_size:
+                filtered[labeled == feat_id] = cls_label
+
+    return filtered
