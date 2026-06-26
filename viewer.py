@@ -249,13 +249,13 @@ class FETViewer:
     def _display_to_voxel(self, dx: int, dy: int) -> tuple[int, int, int]:
         """Convert display pixel coords (from click/hover) to voxel indices.
 
-        Displayed slice is np.rot90(raw[:, :, z], k=1) so the mapping is:
-            voxel_x = nx - 1 - display_y
-            voxel_y = display_x
+        Displayed slice is np.rot90(raw[:, :, z], k=2) so the mapping is:
+            voxel_x = nx - 1 - display_x
+            voxel_y = ny - 1 - display_y
             voxel_z = cur_z
         """
-        x = self.nx - 1 - dy
-        y = dx
+        x = self.nx - 1 - dx
+        y = self.ny - 1 - dy
         return x, y, self.cur_z
 
     def _draw_slice(self):
@@ -267,7 +267,7 @@ class FETViewer:
         )
 
         # Underlay: axial slice, rotated CCW for anatomical orientation
-        under = np.rot90(self.underlay[:, :, self.cur_z], k=1)
+        under = np.rot90(self.underlay[:, :, self.cur_z], k=2)
         vmin = np.percentile(under[under > 0], 2) if np.any(under > 0) else 0
         vmax = np.percentile(under[under > 0], 98) if np.any(under > 0) else under.max()
         if vmax <= vmin:
@@ -279,7 +279,7 @@ class FETViewer:
         )
 
         # Overlay: same rotation
-        ov = np.rot90(self.overlay[:, :, self.cur_z, :], k=1)
+        ov = np.rot90(self.overlay[:, :, self.cur_z, :], k=2)
         self.overlay_display = self.ax_img.imshow(
             ov, origin="lower", aspect="equal"
         )
