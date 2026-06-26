@@ -224,16 +224,16 @@ def preprocess_volumes(
         elif t1_volume is not None:
             t1_resampled = t1_volume.copy()
 
-        if t1_volume is not None and use_antspynet:
+        if t1_resampled is not None and use_antspynet:
             print("  Skull-stripping: antspynet (T1-based)...")
             try:
-                brain_mask = brain_mask_antspynet(t1_volume, affine, modality="t1")
+                brain_mask = brain_mask_antspynet(t1_resampled, affine, modality="t1")
             except Exception as e:
                 print(f"  antspynet failed ({e}), falling back to threshold")
-                brain_mask = brain_mask_from_t1_threshold(t1_volume)
-        elif t1_volume is not None:
+                brain_mask = brain_mask_from_t1_threshold(t1_resampled)
+        elif t1_resampled is not None:
             print("  Skull-stripping: threshold (T1)...")
-            brain_mask = brain_mask_from_t1_threshold(t1_volume)
+            brain_mask = brain_mask_from_t1_threshold(t1_resampled)
         else:
             print("  No T1 — skull-stripping from 20-min PET...")
             brain_mask = brain_mask_from_pet_fallback(sul_volumes[0])
@@ -243,6 +243,7 @@ def preprocess_volumes(
         print(f"  Brain mask: {n_brain} / {n_total} ({100*n_brain/n_total:.1f}%)")
     else:
         brain_mask = np.ones_like(sul_volumes[0], dtype=bool)
+        t1_resampled = t1_volume.copy() if t1_volume is not None else None
 
     if mask_out_zero_voxels:
         any_zero = (sul_volumes[0] == 0) | (sul_volumes[1] == 0) | (sul_volumes[2] == 0)
@@ -324,7 +325,7 @@ def preprocess_4d(
     else:
         brain_mask = np.ones(spatial_shape, dtype=bool)
 
-    # Apply mask and optional smoothing per frame
+    # Capture resampled T1 for output (t1_volume may have been reassigned above)
     t1_resampled = t1_volume.copy() if t1_volume is not None else None
     processed = sul_4d.copy()
     for t in range(sul_4d.shape[3]):
