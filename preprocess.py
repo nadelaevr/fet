@@ -197,24 +197,32 @@ def preprocess_volumes(
     apply_smoothing: bool = True,
     smooth_sigma: float = 1.0,
     mask_out_zero_voxels: bool = True,
-) -> tuple[list[np.ndarray], np.ndarray]:
+) -> tuple[list[np.ndarray], np.ndarray, np.ndarray | None]:
     """
     Preprocessing: skull-stripping (antspynet or fallback) + smoothing.
 
     If T1 shape != PET shape, resamples T1 to PET grid first.
+
+    Returns:
+        processed: list of 3 smoothed/skull-stripped SUL volumes
+        brain_mask: 3D boolean brain mask
+        t1_resampled: T1 resampled to PET space (or None if no T1)
     """
     assert len(sul_volumes) == 3
 
     if apply_skull_strip:
         # Resample T1 to PET space if needed
+        t1_resampled = t1_volume  # may be None
         if t1_volume is not None and t1_volume.shape != sul_volumes[0].shape:
             print(f"  T1 shape {t1_volume.shape} != PET shape {sul_volumes[0].shape}")
-            t1_volume = resample_to_pet(
+            t1_resampled = resample_to_pet(
                 t1_volume, t1_affine,
                 pet_shape=sul_volumes[0].shape,
                 pet_affine=affine,
             )
-            print(f"  Resampled T1 shape: {t1_volume.shape}")
+            print(f"  Resampled T1 shape: {t1_resampled.shape}")
+        elif t1_volume is not None:
+            t1_resampled = t1_volume.copy()
 
         if t1_volume is not None and use_antspynet:
             print("  Skull-stripping: antspynet (T1-based)...")
@@ -248,7 +256,7 @@ def preprocess_volumes(
             v = gaussian_smooth_volume(v, sigma=smooth_sigma, mask=brain_mask)
         processed.append(v)
 
-    return processed, brain_mask
+    return processed, brain_mask, t1_resampled
 
 
 # ---------------------------------------------------------------------------
@@ -263,7 +271,7 @@ def preprocess_4d(
     apply_skull_strip: bool = True,
     apply_smoothing: bool = True,
     smooth_sigma: float = 1.0,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
     """
     Preprocessing for 4D (dynamic) data: skull-stripping + smoothing.
 
@@ -282,6 +290,7 @@ def preprocess_4d(
     Returns:
         processed_4d: 4D SUL array after preprocessing
         brain_mask: 3D boolean brain mask
+        t1_resampled: T1 resampled to PET space (or None if no T1)
     """
     spatial_shape = sul_4d.shape[:3]
 
@@ -316,6 +325,7 @@ def preprocess_4d(
         brain_mask = np.ones(spatial_shape, dtype=bool)
 
     # Apply mask and optional smoothing per frame
+    t1_resampled = t1_volume.copy() if t1_volume is not None else None
     processed = sul_4d.copy()
     for t in range(sul_4d.shape[3]):
         frame = processed[:, :, :, t]
@@ -324,4 +334,4 @@ def preprocess_4d(
             frame_smoothed = gaussian_smooth_volume(frame, sigma=smooth_sigma, mask=brain_mask)
             processed[:, :, :, t] = frame_smoothed
 
-    return processed, brain_mask
+    return processed, brain_mask, t1_resampled

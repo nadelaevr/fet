@@ -172,7 +172,7 @@ def run_static(args):
     print("-" * 60)
 
     sul_list = [sul_volumes["t20"], sul_volumes["t40"], sul_volumes["t60"]]
-    processed, brain_mask = preprocess_volumes(
+    processed, brain_mask, t1_resampled = preprocess_volumes(
         sul_list,
         affine=affine,
         t1_volume=t1_volume,
@@ -326,6 +326,14 @@ def run_static(args):
         brain_mask=brain_mask,
     )
 
+    # Save T1 underlay if available
+    if t1_resampled is not None:
+        from output import save_nifti
+        save_nifti(t1_resampled, affine,
+                   os.path.join(args.output, "map_t1.nii.gz"),
+                   dtype=np.float32)
+        print("  map_t1.nii.gz        T1 underlay (resampled to PET space)")
+
     print("\n" + "=" * 60)
     print("Done!")
     print("=" * 60)
@@ -408,7 +416,7 @@ def run_dynamic(args):
     print("Preprocessing 4D (skull-strip + smoothing)")
     print("-" * 60)
 
-    sul_4d_proc, brain_mask = preprocess_4d(
+    sul_4d_proc, brain_mask, t1_resampled = preprocess_4d(
         sul_4d_full,
         affine=affine,
         t1_volume=t1_volume,
@@ -535,6 +543,14 @@ def run_dynamic(args):
         sul_means=sul_means,
         time_points_min=time_points_min,
     )
+
+    # Save T1 underlay if available
+    if t1_resampled is not None:
+        from output import save_nifti
+        save_nifti(t1_resampled, affine,
+                   os.path.join(args.output, "map_t1.nii.gz"),
+                   dtype=np.float32)
+        print("  map_t1.nii.gz        T1 underlay (resampled to PET space)")
 
     print("\n" + "=" * 60)
     print("Done!")
