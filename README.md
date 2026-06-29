@@ -162,44 +162,180 @@ slope = Σ[(t_i − t̄) · (TBR_i − TBR̄)] / Σ(t_i − t̄)²
 - James WPT. *Research on obesity.* London: HMSO, 1976.
 
 
-## 7. Запуск
+## 7. Установка
 
-### Static
-
-```bash
-# Базовый
-python run_pipeline.py --t20 <20мин> --t40 <40мин> --t60 <60мин> -o <выход>
-
-# С T1 (antspynet skull-stripping)
-python run_pipeline.py --t20 <20мин> --t40 <40мин> --t60 <60мин> --t1 <T1> -o <выход>
-
-# Пороги
-python run_pipeline.py ... --tbr-threshold 1.8 --sul-threshold 1.8
-```
-
-### Dynamic
+### Зависимости
 
 ```bash
-python run_pipeline.py --dynamic --dyn1 <серия1> --dyn2 <серия2> --dyn3 <серия3> -o <выход>
+pip install pydicom numpy nibabel scipy dcm2niix antspyx antspynet matplotlib PyQt5
 ```
 
-### Viewer (Qt5)
+| Пакет | Назначение |
+|-------|------------|
+| `pydicom` | Чтение DICOM-файлов (метаданные, теги) |
+| `numpy` | Работа с массивами, линейная алгебра |
+| `nibabel` | Чтение/запись NIfTI, аффинные преобразования |
+| `scipy` | Гауссово сглаживание, ndimage.zoom, статистика |
+| `dcm2niix` | Конвертация DICOM → NIfTI |
+| `antspyx` | ANTs регистрация, resample, работа с 4D |
+| `antspynet` | Нейросетевой skull-stripping (brain extraction) |
+| `matplotlib` | Интерактивный просмотр результатов (viewer) |
+| `PyQt5` | Графический интерфейс viewer_qt |
+
+### Виртуальное окружение (рекомендуется)
 
 ```bash
-python viewer_qt.py <выходная_папка>
+# Windows
+python -m venv .venv
+.venv\Scripts\activate
+
+# Linux / macOS
+python3 -m venv .venv
+source .venv/bin/activate
+
+pip install -r requirements.txt  # если есть, иначе установить вручную
 ```
 
----
 
-## 8. Выходные файлы
+## 8. Запуск пайплайна
+
+### Общая структура
+
+```
+python run_pipeline.py [режим] [входные данные] [пороги] [препроцессинг] -o <выходная_папка>
+```
+
+### 8.1 Режимы и входные данные
+
+**Static (обязательные аргументы):**
+
+| Флаг | Описание |
+|------|----------|
+| `--t20 PATH` | DICOM-папка со статической серией на 20 мин |
+| `--t40 PATH` | DICOM-папка со статической серией на 40 мин |
+| `--t60 PATH` | DICOM-папка со статической серией на 60 мин |
+
+**Dynamic (обязательные аргументы):**
+
+| Флаг | Описание |
+|------|----------|
+| `--dynamic` | Включить динамический режим |
+| `--dyn1 PATH` | DICOM-папка с динамической серией 1 (0–20 мин) |
+| `--dyn2 PATH` | DICOM-папка с динамической серией 2 (20–40 мин) |
+| `--dyn3 PATH` | DICOM-папка с динамической серией 3 (40–60 мин) |
+
+**Опциональные входные данные:**
+
+| Флаг | Описание |
+|------|----------|
+| `--t1 PATH` | DICOM-папка с T1-взвешенной МРТ. Если указана: skull-stripping через antspynet, сохраняется `t1_orig.nii.gz` для высококачественного вьюера. Без неё: skull-stripping по PET (менее точно). |
+
+**Обязательный для всех режимов:**
+
+| Флаг | Описание |
+|------|----------|
+| `--output PATH`, `-o PATH` | Папка для сохранения результатов (создаётся автоматически) |
+
+### 8.2 Пороги
+
+| Флаг | По умолчанию | Описание |
+|------|-------------|----------|
+| `--sul-threshold FLOAT` | 2.0 | Порог SULmax для значимой маски |
+| `--tbr-threshold FLOAT` | 2.0 | Порог TBR. Воксель считается значимым, если хотя бы в одной временной точке TBR > порога |
+| `--tbr-delta-threshold FLOAT` | 0.3 | Минимальное изменение TBR за `time_span` для классификации тренда (rising/falling) |
+| `--time-span FLOAT` | 40.0 | Интервал между первой и последней точкой в минутах (только static) |
+| `--time-points F F F` | 20 40 60 | Три временные точки в минутах (только static) |
+| `--trim-percent FLOAT` | 2.5 | Процент отбрасываемых хвостов при вычислении SULmean |
+
+### 8.3 Препроцессинг
+
+| Флаг | Описание |
+|------|----------|
+| `--no-skull-strip` | Отключить skull-stripping (полезно если маска мозга не нужна) |
+| `--no-smoothing` | Отключить Гауссово сглаживание |
+| `--smooth-sigma FLOAT` | Сигма Гауссова сглаживания в вокселях (по умолчанию 1.0) |
+| `--min-cluster-size INT` | Минимальный размер connected component в вокселях (по умолчанию 45). 0 — отключить фильтр |
+
+**Dynamic-only:**
+
+| Флаг | Описание |
+|------|----------|
+| `--no-frame INT` | Пропустить первые N фреймов (по умолчанию 0). Полезно, если первые кадры зашумлены |
+
+### 8.4 Примеры
+
+```bash
+# Static, минимальный
+python run_pipeline.py --t20 scans/20min --t40 scans/40min --t60 scans/60min -o results/
+
+# Static с T1 и пониженными порогами
+python run_pipeline.py \
+    --t20 scans/20min --t40 scans/40min --t60 scans/60min \
+    --t1 scans/T1 \
+    --tbr-threshold 1.8 --sul-threshold 1.8 \
+    -o results/
+
+# Dynamic
+python run_pipeline.py --dynamic \
+    --dyn1 scans/dyn_series1 --dyn2 scans/dyn_series2 --dyn3 scans/dyn_series3 \
+    -o results/
+
+# Dynamic с T1, без skull-strip (экономия времени)
+python run_pipeline.py --dynamic \
+    --dyn1 scans/dyn1 --dyn2 scans/dyn2 --dyn3 scans/dyn3 \
+    --t1 scans/T1 --no-skull-strip \
+    -o results/
+
+# Отладка: отключить сглаживание и фильтр кластеров
+python run_pipeline.py \
+    --t20 scans/20min --t40 scans/40min --t60 scans/60min \
+    --no-smoothing --min-cluster-size 0 -o results/
+```
+
+
+## 9. Viewer (Qt5)
+
+Интерактивный просмотр результатов с аппаратным ускорением (QGraphicsView).
+
+```bash
+python viewer_qt.py <выходная_папка> [--upsample N]
+```
+
+| Флаг | По умолчанию | Описание |
+|------|-------------|----------|
+| `--upsample N` | 2 | Фактор апсемплинга для отображения. Игнорируется, если найден `t1_orig.nii.gz` |
+
+**Если пайплайн запускался с `--t1`**, вьюер автоматически найдёт `t1_orig.nii.gz` и покажет T1 в нативном разрешении с аффинно-привязанным оверлеем кластеров.
+
+**Управление:**
+
+| Действие | Клавиша/мышь |
+|----------|-------------|
+| Скролл срезов | Колёсико мыши / ↑ ↓ |
+| Показать TBR-кривую | Клик по вокселю |
+| Сбросить перекрестие | R |
+| Прозрачность оверлея | Ползунок «Overlay» справа |
+| Окно T1 (контраст) | Ползунки «Low%» / «High%» |
+| Выход | Q / Escape |
+
+**График TBR:** клик по любому вокселю показывает кривую TBR(t) с аннотированными значениями. Заголовок графика отображает класс кластера (Rising/Falling/Plateau).
+
+
+## 10. Выходные файлы
 
 | Файл | Содержание |
 |------|-----------|
 | `map_t1.nii.gz` | T1, ресемплированный в PET-пространство |
-| `t1_orig.nii.gz` | Оригинальный T1 в нативном разрешении |
+| `t1_orig.nii.gz` | Оригинальный T1 в нативном разрешении (если был `--t1`) |
+| `map_sul_t{20,40,60}.nii.gz` | Карты SUL для каждого времени |
 | `map_tbr_t{20,40,60}.nii.gz` | Карты TBR для каждого времени |
 | `map_slope.nii.gz` | Карта slope (TBR/мин) |
-| `map_sulmax.nii.gz` / `map_tbrmax.nii.gz` | Максимальные значения по времени |
+| `map_sulmax.nii.gz` | Max SUL по трём точкам |
+| `map_tbrmax.nii.gz` | Max TBR по трём точкам |
 | `mask_clusters.nii.gz` | Кластерная маска (0=bg, 1=rising, 2=falling, 3=plateau) |
 | `mask_brain.nii.gz` | Маска мозга |
+| `mask_sulmax_gt2.nii.gz` | Бинарная маска SULmax > порога |
+| `mask_tbr_gt2*.nii.gz` | Бинарные маски TBR > порога по каждой точке |
 | `report.json` | Числовые результаты (SULmean, TBRmax, размеры кластеров, средние slope) |
+
+Все файлы в формате NIfTI (.nii.gz), открываются в MRIcroGL, ITK-Snap, 3D Slicer.
