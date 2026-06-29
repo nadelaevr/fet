@@ -252,13 +252,13 @@ class FETQtViewer(QtWidgets.QMainWindow):
         for z in range(self.nz):
             # Underlay slice — transpose + fliplr for radiological display
             sl = self.underlay[:, :, z]
-            disp = np.fliplr(sl.T)  # (ny, nx)
+            disp = np.flipud(np.fliplr(sl.T))  # (ny, nx) — radiological + anterior up
 
             # Percentile-based windowing
             pos = sl[sl > 0]
             if pos.size > 0:
-                vmin = np.percentile(pos, 2)
-                vmax = np.percentile(pos, 98)
+                vmin = np.percentile(pos, 5)
+                vmax = np.percentile(pos, 95)
             else:
                 vmin, vmax = sl.min(), sl.max()
             if vmax <= vmin:
@@ -275,7 +275,7 @@ class FETQtViewer(QtWidgets.QMainWindow):
             rgba[:, :, 3] = 255
 
             # Overlay clusters
-            csl = np.fliplr(self.clusters[:, :, z].T)  # (ny, nx) — same transform
+            csl = np.flipud(np.fliplr(self.clusters[:, :, z].T))  # (ny, nx) — same transform
             for label, (r, g, b, a) in _CLUSTER_RGBA.items():
                 mask = csl == label
                 rgba[mask, 0] = r
@@ -323,7 +323,8 @@ class FETQtViewer(QtWidgets.QMainWindow):
             self.ax.set_xlabel("Time (min)")
             self.ax.set_ylabel("TBR")
             self.ax.grid(True, alpha=0.3)
-            self.curve_line, = self.ax.plot([], [], "o-", color="#e74c3c", lw=2, ms=8)
+            self.curve_line, = self.ax.plot([], [], "o-", color="#e74c3c", lw=2.5, ms=14,
+                                             markeredgecolor="#c0392b", markeredgewidth=1.5)
             self.ax.set_xlim(min(self.time_points) - 5, max(self.time_points) + 5)
             self.ax.set_ylim(0, 5)
             self.fig.tight_layout()
@@ -376,8 +377,21 @@ class FETQtViewer(QtWidgets.QMainWindow):
         cluster = int(self.clusters[vx, vy, vz])
         label_map = {1: "Rising", 2: "Falling", 3: "Plateau", 0: "Background"}
 
+        # Clear old annotations
+        for txt in list(self.ax.texts):
+            txt.remove()
+
         self.curve_line.set_data(self.time_points, list(tbr_vals))
-        self.ax.set_ylim(0, max(float(tbr_vals.max()) * 1.3, 2.0))
+        ymax = max(float(tbr_vals.max()) * 1.3, 2.0)
+        self.ax.set_ylim(0, ymax)
+
+        # Value annotations on each point
+        for t, v in zip(self.time_points, tbr_vals):
+            self.ax.annotate(f"{v:.2f}", (t, v),
+                             textcoords="offset points", xytext=(0, 12),
+                             ha="center", fontsize=10, fontweight="bold",
+                             color="#c0392b")
+
         self.ax.set_title(
             f"Voxel ({vx}, {vy}, {vz})  Cluster: {label_map.get(cluster, '?')}\n"
             f"TBR: {tbr_vals[0]:.3f} → {tbr_vals[1]:.3f} → {tbr_vals[2]:.3f}")
