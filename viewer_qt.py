@@ -267,6 +267,8 @@ class FETQtViewer(QtWidgets.QMainWindow):
             print("  Found t1_orig.nii.gz — using native T1 resolution for display")
             self._use_native_t1 = True
             t1_native, t1_affine = load_vol_with_affine(t1_orig_path)
+            self._t1_affine = t1_affine
+            self._pet_affine = pet_affine
             tnx, tny, tnz = t1_native.shape
             self._disp_underlay = t1_native
             self._disp_nx, self._disp_ny = tnx, tny
@@ -502,7 +504,6 @@ class FETQtViewer(QtWidgets.QMainWindow):
     def _on_voxel_clicked(self, vx: int, vy: int, vz: int, dx: int, dy: int):
         if not self.has_curves:
             return
-        tbr_vals = self.tbr_volumes[vx, vy, vz, :]
 
         # Cluster lookup: use display coords in T1-native space, PET coords otherwise
         if self._use_native_t1:
@@ -510,7 +511,19 @@ class FETQtViewer(QtWidgets.QMainWindow):
             t1_y = self._disp_ny - 1 - dy   # reverse flipud
             tz = self._z_map[vz] if self._z_map else vz
             cluster = int(self._disp_clusters[t1_x, t1_y, tz])
+
+            # TBR lookup via physical coordinate mapping (affine → affine)
+            phys = nib.affines.apply_affine(self._t1_affine, [t1_x, t1_y, tz])
+            pet_float = np.linalg.inv(self._pet_affine) @ [phys[0], phys[1], phys[2], 1.0]
+            px = int(round(pet_float[0]))
+            py = int(round(pet_float[1]))
+            pz = int(round(pet_float[2]))
+            px = max(0, min(self.nx - 1, px))
+            py = max(0, min(self.ny - 1, py))
+            pz = max(0, min(self.nz - 1, pz))
+            tbr_vals = self.tbr_volumes[px, py, pz, :]
         else:
+            tbr_vals = self.tbr_volumes[vx, vy, vz, :]
             cluster = int(self.clusters[vx, vy, vz])
 
         print(f"  Click: PET=({vx},{vy},{vz}) display=({dx},{dy}) cluster={cluster} tbr={tbr_vals}")
