@@ -81,7 +81,8 @@ class SliceView(QtWidgets.QGraphicsView):
         self._scene.addItem(self._cross_v)
         self._scene.addItem(self._cross_h)
 
-        self.setRenderHint(QtGui.QPainter.SmoothPixmapTransform, False)
+        self.setRenderHint(QtGui.QPainter.SmoothPixmapTransform, True)
+        self.setRenderHint(QtGui.QPainter.Antialiasing, True)
         self.setDragMode(QtWidgets.QGraphicsView.NoDrag)
         self.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
