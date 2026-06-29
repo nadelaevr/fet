@@ -270,21 +270,14 @@ class FETQtViewer(QtWidgets.QMainWindow):
             tnx, tny, tnz = t1_native.shape
             self._disp_underlay = t1_native
             self._disp_nx, self._disp_ny = tnx, tny
-            print(f"    T1 native: ({tnx}, {tny}, {tnz})")
 
-            # Resample clusters to T1 grid via affine
-            clusters_img = nib.Nifti1Image(self.clusters.astype(np.int16), pet_affine)
-            t1_img = nib.Nifti1Image(np.zeros((tnx, tny, tnz), dtype=np.int16), t1_affine)
-            from nibabel.processing import resample_from_to
-            resampled_img = resample_from_to(clusters_img, t1_img, order=0)
-            self._disp_clusters = np.asarray(resampled_img.dataobj).astype(np.int8)
-
-            # Physical z mapping
-            z_phys_pet = np.array([nib.affines.apply_affine(pet_affine, [0, 0, z])[2]
-                                   for z in range(self.nz)])
-            z_phys_t1 = np.array([nib.affines.apply_affine(t1_affine, [0, 0, z])[2]
-                                  for z in range(tnz)])
-            self._z_map = [int(np.argmin(np.abs(z_phys_t1 - zp))) for zp in z_phys_pet]
+            # Simple zoom from PET to T1 grid (consistent with display coordinate system)
+            zx, zy, zz = tnx / self.nx, tny / self.ny, tnz / self.nz
+            self._disp_clusters = zoom(
+                self.clusters.astype(np.float32), (zx, zy, zz), order=0
+            ).astype(np.int8)
+            self._z_map = [min(max(int(round(z * zz)), 0), tnz - 1) for z in range(self.nz)]
+            print(f"    T1 native: ({tnx}, {tny}, {tnz})  zoom=({zx:.2f}, {zy:.2f}, {zz:.2f})")
         elif self._upsample > 1:
             print(f"  Upsampling {self._upsample}x for display...")
             self._disp_underlay = zoom(self.underlay, (self._upsample, self._upsample, 1), order=3)
@@ -503,19 +496,7 @@ class FETQtViewer(QtWidgets.QMainWindow):
         if not self.has_curves:
             return
         tbr_vals = self.tbr_volumes[vx, vy, vz, :]
-
-        # Cluster lookup: use display-space clusters when native T1 is active
-        if self._use_native_t1:
-            scale_x = self._disp_nx / self.nx
-            scale_y = self._disp_ny / self.ny
-            dx = (self.nx - 1 - vx) * scale_x
-            dy = (self.ny - 1 - vy) * scale_y
-            t1_x = self._disp_nx - 1 - int(dx)
-            t1_y = self._disp_ny - 1 - int(dy)
-            tz = self._z_map[vz] if self._z_map else vz
-            cluster = int(self._disp_clusters[t1_x, t1_y, tz])
-        else:
-            cluster = int(self.clusters[vx, vy, vz])
+        cluster = int(self.clusters[vx, vy, vz])  # PET coords → PET data
 
         print(f"  Click: PET=({vx},{vy},{vz}) cluster={cluster} tbr={tbr_vals}")
         label_map = {1: "Rising", 2: "Falling", 3: "Plateau", 0: "Background"}
@@ -541,17 +522,7 @@ class FETQtViewer(QtWidgets.QMainWindow):
 
     def _on_voxel_hovered(self, vx: int, vy: int, vz: int):
         val = self.underlay[vx, vy, vz]
-        if self._use_native_t1:
-            scale_x = self._disp_nx / self.nx
-            scale_y = self._disp_ny / self.ny
-            dx = (self.nx - 1 - vx) * scale_x
-            dy = (self.ny - 1 - vy) * scale_y
-            t1_x = self._disp_nx - 1 - int(dx)
-            t1_y = self._disp_ny - 1 - int(dy)
-            tz = self._z_map[vz] if self._z_map else vz
-            cls = int(self._disp_clusters[t1_x, t1_y, tz])
-        else:
-            cls = int(self.clusters[vx, vy, vz])
+        cls = int(self.clusters[vx, vy, vz])
         label = {1: "R", 2: "F", 3: "P", 0: "-"}.get(cls, "?")
         self.statusBar().showMessage(
             f"({vx}, {vy}, {vz})  val={val:.3f}  cluster={label}  "
