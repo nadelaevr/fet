@@ -70,8 +70,8 @@ def find_files(output_dir: str, names: list[str]) -> dict[str, str]:
 
 class SliceView(QtWidgets.QGraphicsView):
     slice_changed = QtCore.pyqtSignal(int)
-    voxel_clicked = QtCore.pyqtSignal(int, int, int)
-    voxel_hovered = QtCore.pyqtSignal(int, int, int)
+    voxel_clicked = QtCore.pyqtSignal(int, int, int, int, int)  # vx, vy, vz, dx, dy
+    voxel_hovered = QtCore.pyqtSignal(int, int, int, int, int)  # vx, vy, vz, dx, dy
 
     def __init__(self):
         super().__init__()
@@ -171,7 +171,7 @@ class SliceView(QtWidgets.QGraphicsView):
                 vx, vy, vz = self._display_to_voxel(dx, dy)
                 if 0 <= vx < self._vx and 0 <= vy < self._vy:
                     self.show_crosshair(dx, dy)
-                    self.voxel_clicked.emit(vx, vy, vz)
+                    self.voxel_clicked.emit(vx, vy, vz, dx, dy)
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event: QtGui.QMouseEvent):
@@ -180,7 +180,7 @@ class SliceView(QtWidgets.QGraphicsView):
         if 0 <= dx < self._nx and 0 <= dy < self._ny:
             vx, vy, vz = self._display_to_voxel(dx, dy)
             if 0 <= vx < self._vx and 0 <= vy < self._vy:
-                self.voxel_hovered.emit(vx, vy, vz)
+                self.voxel_hovered.emit(vx, vy, vz, dx, dy)
         super().mouseMoveEvent(event)
 
 
@@ -271,13 +271,20 @@ class FETQtViewer(QtWidgets.QMainWindow):
             self._disp_underlay = t1_native
             self._disp_nx, self._disp_ny = tnx, tny
 
-            # Simple zoom from PET to T1 grid (consistent with display coordinate system)
-            zx, zy, zz = tnx / self.nx, tny / self.ny, tnz / self.nz
-            self._disp_clusters = zoom(
-                self.clusters.astype(np.float32), (zx, zy, zz), order=0
-            ).astype(np.int8)
-            self._z_map = [min(max(int(round(z * zz)), 0), tnz - 1) for z in range(self.nz)]
-            print(f"    T1 native: ({tnx}, {tny}, {tnz})  zoom=({zx:.2f}, {zy:.2f}, {zz:.2f})")
+            # Affine-based resample clusters to T1 grid (correct visual alignment)
+            clusters_img = nib.Nifti1Image(self.clusters.astype(np.int16), pet_affine)
+            t1_img = nib.Nifti1Image(np.zeros((tnx, tny, tnz), dtype=np.int16), t1_affine)
+            from nibabel.processing import resample_from_to
+            resampled_img = resample_from_to(clusters_img, t1_img, order=0)
+            self._disp_clusters = np.asarray(resampled_img.dataobj).astype(np.int8)
+
+            # Physical z mapping
+            z_phys_pet = np.array([nib.affines.apply_affine(pet_affine, [0, 0, z])[2]
+                                   for z in range(self.nz)])
+            z_phys_t1 = np.array([nib.affines.apply_affine(t1_affine, [0, 0, z])[2]
+                                  for z in range(tnz)])
+            self._z_map = [int(np.argmin(np.abs(z_phys_t1 - zp))) for zp in z_phys_pet]
+            print(f"    T1 native: ({tnx}, {tny}, {tnz})")
         elif self._upsample > 1:
             print(f"  Upsampling {self._upsample}x for display...")
             self._disp_underlay = zoom(self.underlay, (self._upsample, self._upsample, 1), order=3)
@@ -492,13 +499,21 @@ class FETQtViewer(QtWidgets.QMainWindow):
         self._cur_z = z
         self._update_info()
 
-    def _on_voxel_clicked(self, vx: int, vy: int, vz: int):
+    def _on_voxel_clicked(self, vx: int, vy: int, vz: int, dx: int, dy: int):
         if not self.has_curves:
             return
         tbr_vals = self.tbr_volumes[vx, vy, vz, :]
-        cluster = int(self.clusters[vx, vy, vz])  # PET coords → PET data
 
-        print(f"  Click: PET=({vx},{vy},{vz}) cluster={cluster} tbr={tbr_vals}")
+        # Cluster lookup: use display coords in T1-native space, PET coords otherwise
+        if self._use_native_t1:
+            t1_x = self._disp_nx - 1 - dx   # reverse fliplr
+            t1_y = self._disp_ny - 1 - dy   # reverse flipud
+            tz = self._z_map[vz] if self._z_map else vz
+            cluster = int(self._disp_clusters[t1_x, t1_y, tz])
+        else:
+            cluster = int(self.clusters[vx, vy, vz])
+
+        print(f"  Click: PET=({vx},{vy},{vz}) display=({dx},{dy}) cluster={cluster} tbr={tbr_vals}")
         label_map = {1: "Rising", 2: "Falling", 3: "Plateau", 0: "Background"}
 
         for txt in list(self.ax.texts):
@@ -520,9 +535,15 @@ class FETQtViewer(QtWidgets.QMainWindow):
         self.fig.tight_layout()
         self.canvas.draw_idle()
 
-    def _on_voxel_hovered(self, vx: int, vy: int, vz: int):
+    def _on_voxel_hovered(self, vx: int, vy: int, vz: int, dx: int, dy: int):
         val = self.underlay[vx, vy, vz]
-        cls = int(self.clusters[vx, vy, vz])
+        if self._use_native_t1:
+            t1_x = self._disp_nx - 1 - dx
+            t1_y = self._disp_ny - 1 - dy
+            tz = self._z_map[vz] if self._z_map else vz
+            cls = int(self._disp_clusters[t1_x, t1_y, tz])
+        else:
+            cls = int(self.clusters[vx, vy, vz])
         label = {1: "R", 2: "F", 3: "P", 0: "-"}.get(cls, "?")
         self.statusBar().showMessage(
             f"({vx}, {vy}, {vz})  val={val:.3f}  cluster={label}  "
