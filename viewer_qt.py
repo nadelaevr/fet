@@ -541,7 +541,17 @@ class FETQtViewer(QtWidgets.QMainWindow):
 
     def _on_voxel_hovered(self, vx: int, vy: int, vz: int):
         val = self.underlay[vx, vy, vz]
-        cls = int(self.clusters[vx, vy, vz])
+        if self._use_native_t1:
+            scale_x = self._disp_nx / self.nx
+            scale_y = self._disp_ny / self.ny
+            dx = (self.nx - 1 - vx) * scale_x
+            dy = (self.ny - 1 - vy) * scale_y
+            t1_x = self._disp_nx - 1 - int(dx)
+            t1_y = self._disp_ny - 1 - int(dy)
+            tz = self._z_map[vz] if self._z_map else vz
+            cls = int(self._disp_clusters[t1_x, t1_y, tz])
+        else:
+            cls = int(self.clusters[vx, vy, vz])
         label = {1: "R", 2: "F", 3: "P", 0: "-"}.get(cls, "?")
         self.statusBar().showMessage(
             f"({vx}, {vy}, {vz})  val={val:.3f}  cluster={label}  "
