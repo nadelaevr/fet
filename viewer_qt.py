@@ -28,16 +28,14 @@ matplotlib.use("Qt5Agg")
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 
+from scipy.ndimage import zoom
+
 # ── Cluster colours ──────────────────────────────────────────────────────
 _CLUSTER_RGB = {   # alpha is controlled by slider
     1: (255, 51,  51),    # rising  — red
     2: (51,  102, 255),   # falling — blue
     3: (51,  204, 51),    # plateau — green
 }
-
-# Target display size for anti-aliased upscaling
-_DISPLAY_TARGET = 600  # shorter dimension will be scaled to this
-
 
 # ── Data loading ─────────────────────────────────────────────────────────
 
@@ -106,32 +104,18 @@ class SliceView(QtWidgets.QGraphicsView):
         self._ny = 0
         self._vx = 0   # original voxel dimensions
         self._vy = 0
-        self._scale = 1.0
 
     def set_overlay_opacity(self, opacity: float):
         self._overlay_item.setOpacity(opacity)
 
     def set_data(self, underlay_pixmaps: list, overlay_pixmaps: list,
-                 nx: int, ny: int, nz: int, target_size: int = _DISPLAY_TARGET):
-        # Scale to target size with smooth transformation
+                 nx: int, ny: int, nz: int):
         self._vx, self._vy = nx, ny
-        scale = target_size / min(nx, ny)
-        self._scale = scale
-        self._nx = int(nx * scale)
-        self._ny = int(ny * scale)
+        self._nx = underlay_pixmaps[0].width() if underlay_pixmaps else 0
+        self._ny = underlay_pixmaps[0].height() if underlay_pixmaps else 0
 
-        self._underlay_pixmaps = [
-            p.scaled(self._nx, self._ny,
-                     QtCore.Qt.IgnoreAspectRatio,
-                     QtCore.Qt.SmoothTransformation)
-            for p in underlay_pixmaps
-        ]
-        self._overlay_pixmaps = [
-            p.scaled(self._nx, self._ny,
-                     QtCore.Qt.IgnoreAspectRatio,
-                     QtCore.Qt.SmoothTransformation)
-            for p in overlay_pixmaps
-        ]
+        self._underlay_pixmaps = underlay_pixmaps
+        self._overlay_pixmaps = overlay_pixmaps
         self._nz = nz
         self._cur_z = nz // 2
         self._show_slice()
@@ -158,9 +142,12 @@ class SliceView(QtWidgets.QGraphicsView):
         disp = flipud(fliplr(data.T)) means:
           disp[row, col] = data[nx-1-col, ny-1-row, z]
         => vx = nx-1 - (dx/scale),  vy = ny-1 - (dy/scale)
+        where scale = display_px / original_voxels
         """
-        vx = self._vx - 1 - int(dx / self._scale)
-        vy = self._vy - 1 - int(dy / self._scale)
+        scale_x = self._nx / self._vx if self._vx else 1
+        scale_y = self._ny / self._vy if self._vy else 1
+        vx = self._vx - 1 - int(dx / scale_x)
+        vy = self._vy - 1 - int(dy / scale_y)
         return vx, vy, self._cur_z
 
     # ── Crosshair ──
@@ -215,9 +202,10 @@ class SliceView(QtWidgets.QGraphicsView):
 # ── Main viewer ──────────────────────────────────────────────────────────
 
 class FETQtViewer(QtWidgets.QMainWindow):
-    def __init__(self, output_dir: str):
+    def __init__(self, output_dir: str, upsample: int = 2):
         super().__init__()
         self.output_dir = output_dir
+        self._upsample = upsample
 
         # ── Load report ──
         report_path = os.path.join(output_dir, "report.json")
@@ -279,14 +267,30 @@ class FETQtViewer(QtWidgets.QMainWindow):
         self.nx, self.ny, self.nz = self.shape = self.underlay.shape
         print(f"  Volume: {self.shape}  ({self.underlay_label})")
 
+        # ── Optional upsampling for display quality ──
+        disp_underlay = self.underlay
+        disp_clusters = self.clusters
+        if self._upsample > 1:
+            print(f"  Upsampling {self._upsample}x for display...")
+            disp_underlay = zoom(self.underlay, (self._upsample, self._upsample, 1), order=3)
+            disp_clusters = zoom(
+                self.clusters.astype(np.float32),
+                (self._upsample, self._upsample, 1), order=0
+            ).astype(np.int8)
+            self._disp_nx = self.nx * self._upsample
+            self._disp_ny = self.ny * self._upsample
+        else:
+            self._disp_nx = self.nx
+            self._disp_ny = self.ny
+
         # ── Precompute underlay + overlay pixmaps (separated) ──
         print("  Precomputing slice pixmaps...")
         underlay_pixmaps = []
         overlay_pixmaps = []
 
         for z in range(self.nz):
-            sl = self.underlay[:, :, z]
-            disp = np.flipud(np.fliplr(sl.T))  # (ny, nx) — radiological + anterior up
+            sl = disp_underlay[:, :, z]
+            disp_sl = np.flipud(np.fliplr(sl.T))  # (ny, nx) — radiological + anterior up
 
             # Percentile-based windowing
             pos = sl[sl > 0]
@@ -299,26 +303,26 @@ class FETQtViewer(QtWidgets.QMainWindow):
                 vmin, vmax = sl.min(), sl.max()
 
             # ── Underlay: gray only ──
-            norm = np.clip((disp - vmin) / (vmax - vmin) * 255, 0, 255).astype(np.uint8)
-            under_rgba = np.zeros((self.ny, self.nx, 4), dtype=np.uint8)
+            norm = np.clip((disp_sl - vmin) / (vmax - vmin) * 255, 0, 255).astype(np.uint8)
+            under_rgba = np.zeros((self._disp_ny, self._disp_nx, 4), dtype=np.uint8)
             under_rgba[:, :, 0] = norm
             under_rgba[:, :, 1] = norm
             under_rgba[:, :, 2] = norm
             under_rgba[:, :, 3] = 255
-            qimg = QtGui.QImage(under_rgba.tobytes(), self.nx, self.ny, self.nx * 4,
+            qimg = QtGui.QImage(under_rgba.tobytes(), self._disp_nx, self._disp_ny, self._disp_nx * 4,
                                 QtGui.QImage.Format_RGBA8888)
             underlay_pixmaps.append(QtGui.QPixmap.fromImage(qimg))
 
             # ── Overlay: transparent bg + coloured clusters ──
-            csl = np.flipud(np.fliplr(self.clusters[:, :, z].T))
-            over_rgba = np.zeros((self.ny, self.nx, 4), dtype=np.uint8)
+            csl = np.flipud(np.fliplr(disp_clusters[:, :, z].T))
+            over_rgba = np.zeros((self._disp_ny, self._disp_nx, 4), dtype=np.uint8)
             for label, (r, g, b) in _CLUSTER_RGB.items():
                 mask = csl == label
                 over_rgba[mask, 0] = r
                 over_rgba[mask, 1] = g
                 over_rgba[mask, 2] = b
                 over_rgba[mask, 3] = 200  # full opacity, controlled by slider
-            qimg2 = QtGui.QImage(over_rgba.tobytes(), self.nx, self.ny, self.nx * 4,
+            qimg2 = QtGui.QImage(over_rgba.tobytes(), self._disp_nx, self._disp_ny, self._disp_nx * 4,
                                  QtGui.QImage.Format_RGBA8888)
             overlay_pixmaps.append(QtGui.QPixmap.fromImage(qimg2))
 
@@ -491,6 +495,8 @@ def main():
     print("FET Viewer — Qt5 hardware-accelerated")
     parser = argparse.ArgumentParser(description="Interactive FET curve viewer (Qt)")
     parser.add_argument("output_dir", help="Pipeline output directory with NIfTI maps")
+    parser.add_argument("--upsample", type=int, default=2,
+                        help="Upsampling factor for display (default: 2)")
     args = parser.parse_args()
 
     if not os.path.isdir(args.output_dir):
@@ -499,7 +505,7 @@ def main():
 
     app = QtWidgets.QApplication(sys.argv)
     app.setStyle("Fusion")
-    viewer = FETQtViewer(args.output_dir)
+    viewer = FETQtViewer(args.output_dir, upsample=args.upsample)
     viewer.show()
     sys.exit(app.exec_())
 
