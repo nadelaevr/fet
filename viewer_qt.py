@@ -278,20 +278,26 @@ class FETQtViewer(QtWidgets.QMainWindow):
             print("  Found t1_orig.nii.gz — using native T1 resolution for display")
             t1_native = load_vol(t1_orig_path)
             tnx, tny, tnz = t1_native.shape
-            if tnz == self.nz:
-                disp_underlay = t1_native
-                zoom_xy = (tnx / self.nx, tny / self.ny)
-                print(f"    T1 native: ({tnx}, {tny}, {tnz}), zoom factors: {zoom_xy}")
-                disp_clusters = zoom(
-                    self.clusters.astype(np.float32),
-                    (zoom_xy[0], zoom_xy[1], 1), order=0
-                ).astype(np.int8)
-                if tbr_display is not None:
-                    tbr_display = zoom(tbr_display, (zoom_xy[0], zoom_xy[1], 1, 1), order=1)
-                self._disp_nx, self._disp_ny = tnx, tny
-            else:
-                print(f"    WARNING: T1 z={tnz} != PET z={self.nz}, falling back to resampled T1")
-                self._disp_nx, self._disp_ny = self.nx, self.ny
+
+            # Compute 3D zoom factors from PET to T1 space
+            zx, zy, zz = tnx / self.nx, tny / self.ny, tnz / self.nz
+            print(f"    T1 native: ({tnx}, {tny}, {tnz})  zoom=({zx:.2f}, {zy:.2f}, {zz:.2f})")
+
+            # Resample clusters to T1 grid (nearest-neighbour — preserves labels)
+            disp_clusters = zoom(
+                self.clusters.astype(np.float32),
+                (zx, zy, zz), order=0
+            ).astype(np.int8)
+
+            disp_underlay = t1_native
+            self._disp_nx, self._disp_ny = tnx, tny
+            self._zoom_xy = (zx, zy)
+            self._zoom_z = zz
+
+            # Map each PET z to the best T1 slice
+            self._z_map = [min(max(int(round(z * zz)), 0), tnz - 1) for z in range(self.nz)]
+
+            # Keep TBR at PET resolution (too large to zoom) — convert coords on click
         else:
             # No native T1 — use upsampling if requested
             if self._upsample > 1:
@@ -309,9 +315,10 @@ class FETQtViewer(QtWidgets.QMainWindow):
                 self._disp_nx = self.nx
                 self._disp_ny = self.ny
 
-        # Update tbr_volumes to display resolution for correct click queries
-        if tbr_display is not None:
-            self.tbr_volumes = tbr_display
+        # Keep TBR volumes at PET resolution — map coords back on click
+        if self.mode == "static" and not hasattr(self, '_z_map'):
+            # Only zoom TBR if using --upsample (no native T1)
+            self.tbr_volumes = tbr_display if tbr_display is not None else self.tbr_volumes
 
         # ── Precompute underlay + overlay pixmaps (separated) ──
         print("  Precomputing slice pixmaps...")
@@ -319,8 +326,11 @@ class FETQtViewer(QtWidgets.QMainWindow):
         overlay_pixmaps = []
 
         for z in range(self.nz):
-            sl = disp_underlay[:, :, z]
+            tz = self._z_map[z] if hasattr(self, '_z_map') else z
+            sl = disp_underlay[:, :, tz]
+            csl_raw = disp_clusters[:, :, tz]
             disp_sl = np.flipud(np.fliplr(sl.T))  # (ny, nx) — radiological + anterior up
+            csl = np.flipud(np.fliplr(csl_raw.T))
 
             # Percentile-based windowing
             pos = sl[sl > 0]
@@ -344,7 +354,6 @@ class FETQtViewer(QtWidgets.QMainWindow):
             underlay_pixmaps.append(QtGui.QPixmap.fromImage(qimg))
 
             # ── Overlay: transparent bg + coloured clusters ──
-            csl = np.flipud(np.fliplr(disp_clusters[:, :, z].T))
             over_rgba = np.zeros((self._disp_ny, self._disp_nx, 4), dtype=np.uint8)
             for label, (r, g, b) in _CLUSTER_RGB.items():
                 mask = csl == label
