@@ -420,9 +420,9 @@ class FETQtViewer(QtWidgets.QMainWindow):
             lo_row = QtWidgets.QHBoxLayout()
             lo_row.addWidget(QtWidgets.QLabel("Low%:"))
             self._win_lo_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-            self._win_lo_slider.setRange(0, 20)
+            self._win_lo_slider.setRange(0, 40)
             self._win_lo_slider.setValue(self._win_lo)
-            self._win_lo_slider.setTickInterval(2)
+            self._win_lo_slider.setTickInterval(5)
             self._win_lo_label = QtWidgets.QLabel(f"{self._win_lo}%")
             lo_row.addWidget(self._win_lo_slider)
             lo_row.addWidget(self._win_lo_label)
@@ -432,9 +432,9 @@ class FETQtViewer(QtWidgets.QMainWindow):
             hi_row = QtWidgets.QHBoxLayout()
             hi_row.addWidget(QtWidgets.QLabel("High%:"))
             self._win_hi_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-            self._win_hi_slider.setRange(80, 100)
+            self._win_hi_slider.setRange(60, 100)
             self._win_hi_slider.setValue(self._win_hi)
-            self._win_hi_slider.setTickInterval(2)
+            self._win_hi_slider.setTickInterval(5)
             self._win_hi_label = QtWidgets.QLabel(f"{self._win_hi}%")
             hi_row.addWidget(self._win_hi_slider)
             hi_row.addWidget(self._win_hi_label)
@@ -502,10 +502,22 @@ class FETQtViewer(QtWidgets.QMainWindow):
     def _on_voxel_clicked(self, vx: int, vy: int, vz: int):
         if not self.has_curves:
             return
-        print(f"  Click: PET=({vx},{vy},{vz})  clusters_shape={self.clusters.shape}")
         tbr_vals = self.tbr_volumes[vx, vy, vz, :]
-        cluster = int(self.clusters[vx, vy, vz])
-        print(f"    tbr={tbr_vals}  cluster={cluster}")
+
+        # Cluster lookup: use display-space clusters when native T1 is active
+        if self._use_native_t1:
+            scale_x = self._disp_nx / self.nx
+            scale_y = self._disp_ny / self.ny
+            dx = (self.nx - 1 - vx) * scale_x
+            dy = (self.ny - 1 - vy) * scale_y
+            t1_x = self._disp_nx - 1 - int(dx)
+            t1_y = self._disp_ny - 1 - int(dy)
+            tz = self._z_map[vz] if self._z_map else vz
+            cluster = int(self._disp_clusters[t1_x, t1_y, tz])
+        else:
+            cluster = int(self.clusters[vx, vy, vz])
+
+        print(f"  Click: PET=({vx},{vy},{vz}) cluster={cluster} tbr={tbr_vals}")
         label_map = {1: "Rising", 2: "Falling", 3: "Plateau", 0: "Background"}
 
         for txt in list(self.ax.texts):
