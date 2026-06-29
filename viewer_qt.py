@@ -10,6 +10,7 @@ Controls:
     Click on image         — show TBR(t) curve
     R                      — reset crosshair
     Q / Escape             — quit
+    Opacity slider (right) — adjust cluster overlay transparency
 """
 
 import argparse
@@ -28,14 +29,17 @@ from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 
 # ── Cluster colours ──────────────────────────────────────────────────────
-_CLUSTER_RGBA = {
-    1: (255, 51,  51,  128),   # rising  — red, 50% alpha
-    2: (51,  102, 255, 128),   # falling — blue
-    3: (51,  204, 51,  128),   # plateau — green
+_CLUSTER_RGB = {   # alpha is controlled by slider
+    1: (255, 51,  51),    # rising  — red
+    2: (51,  102, 255),   # falling — blue
+    3: (51,  204, 51),    # plateau — green
 }
 
+# Target display size for anti-aliased upscaling
+_DISPLAY_TARGET = 600  # shorter dimension will be scaled to this
 
-# ── Data loading (reuse from viewer.py) ──────────────────────────────────
+
+# ── Data loading ─────────────────────────────────────────────────────────
 
 def load_vol(path: str) -> np.ndarray:
     img = nib.load(path)
@@ -61,16 +65,22 @@ def find_files(output_dir: str, names: list[str]) -> dict[str, str]:
 class SliceView(QtWidgets.QGraphicsView):
     """Scrollable axial slice display with click-to-query."""
 
-    slice_changed = QtCore.pyqtSignal(int)           # z index
-    voxel_clicked = QtCore.pyqtSignal(int, int, int)  # vx, vy, vz
-    voxel_hovered = QtCore.pyqtSignal(int, int, int, float, int)  # vx, vy, vz, val, cluster
+    slice_changed = QtCore.pyqtSignal(int)
+    voxel_clicked = QtCore.pyqtSignal(int, int, int)
+    voxel_hovered = QtCore.pyqtSignal(int, int, int)
 
     def __init__(self):
         super().__init__()
         self._scene = QtWidgets.QGraphicsScene(self)
         self.setScene(self._scene)
-        self._pixmap_item = QtWidgets.QGraphicsPixmapItem()
-        self._scene.addItem(self._pixmap_item)
+
+        # Separated underlay + overlay for independent opacity control
+        self._underlay_item = QtWidgets.QGraphicsPixmapItem()
+        self._overlay_item = QtWidgets.QGraphicsPixmapItem()
+        self._scene.addItem(self._underlay_item)
+        self._scene.addItem(self._overlay_item)
+
+        # Crosshair
         self._cross_v = QtWidgets.QGraphicsLineItem()
         self._cross_h = QtWidgets.QGraphicsLineItem()
         pen = QtGui.QPen(QtGui.QColor(255, 255, 0, 150), 1)
@@ -86,28 +96,53 @@ class SliceView(QtWidgets.QGraphicsView):
         self.setDragMode(QtWidgets.QGraphicsView.NoDrag)
         self.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
-        self.setTransformationAnchor(QtWidgets.QGraphicsView.AnchorUnderMouse)
         self.setMouseTracking(True)
 
-        self._pixmaps = []       # list of QPixmap, one per slice
+        self._underlay_pixmaps = []
+        self._overlay_pixmaps = []
         self._nz = 0
         self._cur_z = 0
-        self._nx = 0
+        self._nx = 0   # canvas size (after scaling)
         self._ny = 0
-        self._click_vx = self._click_vy = -1
+        self._vx = 0   # original voxel dimensions
+        self._vy = 0
+        self._scale = 1.0
 
-    def set_data(self, pixmaps: list, nx: int, ny: int, nz: int):
-        self._pixmaps = pixmaps
-        self._nx, self._ny, self._nz = nx, ny, nz
+    def set_overlay_opacity(self, opacity: float):
+        self._overlay_item.setOpacity(opacity)
+
+    def set_data(self, underlay_pixmaps: list, overlay_pixmaps: list,
+                 nx: int, ny: int, nz: int, target_size: int = _DISPLAY_TARGET):
+        # Scale to target size with smooth transformation
+        self._vx, self._vy = nx, ny
+        scale = target_size / min(nx, ny)
+        self._scale = scale
+        self._nx = int(nx * scale)
+        self._ny = int(ny * scale)
+
+        self._underlay_pixmaps = [
+            p.scaled(self._nx, self._ny,
+                     QtCore.Qt.IgnoreAspectRatio,
+                     QtCore.Qt.SmoothTransformation)
+            for p in underlay_pixmaps
+        ]
+        self._overlay_pixmaps = [
+            p.scaled(self._nx, self._ny,
+                     QtCore.Qt.IgnoreAspectRatio,
+                     QtCore.Qt.SmoothTransformation)
+            for p in overlay_pixmaps
+        ]
+        self._nz = nz
         self._cur_z = nz // 2
         self._show_slice()
 
     def _show_slice(self):
-        if not self._pixmaps:
+        if not self._underlay_pixmaps:
             return
-        self._pixmap_item.setPixmap(self._pixmaps[self._cur_z])
-        self._scene.setSceneRect(self._pixmap_item.boundingRect())
-        self.fitInView(self._pixmap_item, QtCore.Qt.KeepAspectRatio)
+        self._underlay_item.setPixmap(self._underlay_pixmaps[self._cur_z])
+        self._overlay_item.setPixmap(self._overlay_pixmaps[self._cur_z])
+        self._scene.setSceneRect(self._underlay_item.boundingRect())
+        self.fitInView(self._underlay_item, QtCore.Qt.KeepAspectRatio)
         self.slice_changed.emit(self._cur_z)
 
     # ── Navigation ──
@@ -116,16 +151,16 @@ class SliceView(QtWidgets.QGraphicsView):
         self._cur_z = max(0, min(self._nz - 1, self._cur_z + dz))
         self._show_slice()
 
-    def set_slice(self, z: int):
-        self._cur_z = max(0, min(self._nz - 1, z))
-        self._show_slice()
-
     # ── Coordinate mapping ──
 
     def _display_to_voxel(self, dx: int, dy: int) -> tuple:
-        """Convert display coords (pixmap pixel) to canonical voxel coords."""
-        vx = self._nx - 1 - dx
-        vy = dy
+        """Convert display coords (scaled pixmap pixel) to canonical voxel coords.
+        disp = flipud(fliplr(data.T)) means:
+          disp[row, col] = data[nx-1-col, ny-1-row, z]
+        => vx = nx-1 - (dx/scale),  vy = ny-1 - (dy/scale)
+        """
+        vx = self._vx - 1 - int(dx / self._scale)
+        vy = self._vy - 1 - int(dy / self._scale)
         return vx, vy, self._cur_z
 
     # ── Crosshair ──
@@ -153,7 +188,6 @@ class SliceView(QtWidgets.QGraphicsView):
             self.scroll_slice(-1)
         elif event.key() == QtCore.Qt.Key_R:
             self.show_crosshair(-1, -1)
-            self._click_vx = self._click_vy = -1
         else:
             super().keyPressEvent(event)
 
@@ -163,9 +197,9 @@ class SliceView(QtWidgets.QGraphicsView):
             dx, dy = int(pt.x()), int(pt.y())
             if 0 <= dx < self._nx and 0 <= dy < self._ny:
                 vx, vy, vz = self._display_to_voxel(dx, dy)
-                self._click_vx, self._click_vy = vx, vy
-                self.show_crosshair(dx, dy)
-                self.voxel_clicked.emit(vx, vy, vz)
+                if 0 <= vx < self._vx and 0 <= vy < self._vy:
+                    self.show_crosshair(dx, dy)
+                    self.voxel_clicked.emit(vx, vy, vz)
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event: QtGui.QMouseEvent):
@@ -173,7 +207,8 @@ class SliceView(QtWidgets.QGraphicsView):
         dx, dy = int(pt.x()), int(pt.y())
         if 0 <= dx < self._nx and 0 <= dy < self._ny:
             vx, vy, vz = self._display_to_voxel(dx, dy)
-            self.voxel_hovered.emit(vx, vy, vz, -1, -1)  # values filled by controller
+            if 0 <= vx < self._vx and 0 <= vy < self._vy:
+                self.voxel_hovered.emit(vx, vy, vz)
         super().mouseMoveEvent(event)
 
 
@@ -244,14 +279,12 @@ class FETQtViewer(QtWidgets.QMainWindow):
         self.nx, self.ny, self.nz = self.shape = self.underlay.shape
         print(f"  Volume: {self.shape}  ({self.underlay_label})")
 
-        # ── Precompute slice pixmaps ──
+        # ── Precompute underlay + overlay pixmaps (separated) ──
         print("  Precomputing slice pixmaps...")
-        self._pixmaps = []
-        self._vmin = np.zeros(self.nz)
-        self._vmax = np.zeros(self.nz)
+        underlay_pixmaps = []
+        overlay_pixmaps = []
 
         for z in range(self.nz):
-            # Underlay slice — transpose + fliplr for radiological display
             sl = self.underlay[:, :, z]
             disp = np.flipud(np.fliplr(sl.T))  # (ny, nx) — radiological + anterior up
 
@@ -264,29 +297,30 @@ class FETQtViewer(QtWidgets.QMainWindow):
                 vmin, vmax = sl.min(), sl.max()
             if vmax <= vmin:
                 vmin, vmax = sl.min(), sl.max()
-            self._vmin[z], self._vmax[z] = vmin, vmax
 
-            # Normalise underlay to 0-255
+            # ── Underlay: gray only ──
             norm = np.clip((disp - vmin) / (vmax - vmin) * 255, 0, 255).astype(np.uint8)
-            # Build RGBA: gray underlay + coloured cluster overlay
-            rgba = np.zeros((self.ny, self.nx, 4), dtype=np.uint8)
-            rgba[:, :, 0] = norm
-            rgba[:, :, 1] = norm
-            rgba[:, :, 2] = norm
-            rgba[:, :, 3] = 255
-
-            # Overlay clusters
-            csl = np.flipud(np.fliplr(self.clusters[:, :, z].T))  # (ny, nx) — same transform
-            for label, (r, g, b, a) in _CLUSTER_RGBA.items():
-                mask = csl == label
-                rgba[mask, 0] = r
-                rgba[mask, 1] = g
-                rgba[mask, 2] = b
-                rgba[mask, 3] = a
-
-            qimg = QtGui.QImage(rgba.tobytes(), self.nx, self.ny, self.nx * 4,
+            under_rgba = np.zeros((self.ny, self.nx, 4), dtype=np.uint8)
+            under_rgba[:, :, 0] = norm
+            under_rgba[:, :, 1] = norm
+            under_rgba[:, :, 2] = norm
+            under_rgba[:, :, 3] = 255
+            qimg = QtGui.QImage(under_rgba.tobytes(), self.nx, self.ny, self.nx * 4,
                                 QtGui.QImage.Format_RGBA8888)
-            self._pixmaps.append(QtGui.QPixmap.fromImage(qimg))
+            underlay_pixmaps.append(QtGui.QPixmap.fromImage(qimg))
+
+            # ── Overlay: transparent bg + coloured clusters ──
+            csl = np.flipud(np.fliplr(self.clusters[:, :, z].T))
+            over_rgba = np.zeros((self.ny, self.nx, 4), dtype=np.uint8)
+            for label, (r, g, b) in _CLUSTER_RGB.items():
+                mask = csl == label
+                over_rgba[mask, 0] = r
+                over_rgba[mask, 1] = g
+                over_rgba[mask, 2] = b
+                over_rgba[mask, 3] = 200  # full opacity, controlled by slider
+            qimg2 = QtGui.QImage(over_rgba.tobytes(), self.nx, self.ny, self.nx * 4,
+                                 QtGui.QImage.Format_RGBA8888)
+            overlay_pixmaps.append(QtGui.QPixmap.fromImage(qimg2))
 
         self._cur_z = self.nz // 2
 
@@ -301,7 +335,8 @@ class FETQtViewer(QtWidgets.QMainWindow):
 
         # Left: image
         self.view = SliceView()
-        self.view.set_data(self._pixmaps, self.nx, self.ny, self.nz)
+        self.view.set_data(underlay_pixmaps, overlay_pixmaps,
+                           self.nx, self.ny, self.nz)
         layout.addWidget(self.view, 2)
 
         # Right panel
@@ -315,7 +350,7 @@ class FETQtViewer(QtWidgets.QMainWindow):
         self.info_label.setStyleSheet("font-size: 13px; padding: 6px;")
         right_layout.addWidget(self.info_label)
 
-        # TBR curve (matplotlib embedded in Qt)
+        # TBR curve
         if self.has_curves:
             self.fig = Figure(figsize=(5, 4), dpi=100)
             self.canvas = FigureCanvas(self.fig)
@@ -337,6 +372,23 @@ class FETQtViewer(QtWidgets.QMainWindow):
             no_curve.setAlignment(QtCore.Qt.AlignCenter)
             no_curve.setStyleSheet("color: #888; font-size: 13px;")
             right_layout.addWidget(no_curve, 1)
+
+        # ── Opacity slider ──
+        opacity_w = QtWidgets.QWidget()
+        opacity_l = QtWidgets.QHBoxLayout(opacity_w)
+        opacity_l.setContentsMargins(0, 4, 0, 4)
+        opacity_l.addWidget(QtWidgets.QLabel("Overlay:"))
+        self.opacity_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.opacity_slider.setRange(0, 100)
+        self.opacity_slider.setValue(50)
+        self.opacity_slider.setTickPosition(QtWidgets.QSlider.TicksBelow)
+        self.opacity_slider.setTickInterval(10)
+        self.opacity_slider.valueChanged.connect(self._on_opacity_changed)
+        opacity_l.addWidget(self.opacity_slider)
+        self.opacity_label = QtWidgets.QLabel("50%")
+        self.opacity_label.setFixedWidth(35)
+        opacity_l.addWidget(self.opacity_label)
+        right_layout.addWidget(opacity_w)
 
         # Legend
         legend_w = QtWidgets.QWidget()
@@ -367,6 +419,10 @@ class FETQtViewer(QtWidgets.QMainWindow):
 
     # ── Slots ──
 
+    def _on_opacity_changed(self, value: int):
+        self.view.set_overlay_opacity(value / 100.0)
+        self.opacity_label.setText(f"{value}%")
+
     def _on_slice_changed(self, z: int):
         self._cur_z = z
         self._update_info()
@@ -378,7 +434,6 @@ class FETQtViewer(QtWidgets.QMainWindow):
         cluster = int(self.clusters[vx, vy, vz])
         label_map = {1: "Rising", 2: "Falling", 3: "Plateau", 0: "Background"}
 
-        # Clear old annotations
         for txt in list(self.ax.texts):
             txt.remove()
 
@@ -386,7 +441,6 @@ class FETQtViewer(QtWidgets.QMainWindow):
         ymax = max(float(tbr_vals.max()) * 1.3, 2.0)
         self.ax.set_ylim(0, ymax)
 
-        # Value annotations on each point
         for t, v in zip(self.time_points, tbr_vals):
             self.ax.annotate(f"{v:.2f}", (t, v),
                              textcoords="offset points", xytext=(0, 12),
@@ -402,7 +456,7 @@ class FETQtViewer(QtWidgets.QMainWindow):
         print(f"  Click: voxel=({vx},{vy},{vz}) cluster={cluster} "
               f"TBR=({tbr_vals[0]:.3f}, {tbr_vals[1]:.3f}, {tbr_vals[2]:.3f})")
 
-    def _on_voxel_hovered(self, vx: int, vy: int, vz: int, _val: float, _cls: int):
+    def _on_voxel_hovered(self, vx: int, vy: int, vz: int):
         val = self.underlay[vx, vy, vz]
         cls = int(self.clusters[vx, vy, vz])
         label = {1: "R", 2: "F", 3: "P", 0: "-"}.get(cls, "?")
