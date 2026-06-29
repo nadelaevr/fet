@@ -334,6 +334,12 @@ def run_static(args):
                    dtype=np.float32)
         print("  map_t1.nii.gz        T1 underlay (resampled to PET space)")
 
+        # Also save original T1 at native resolution for viewer
+        save_nifti(t1_volume, t1_affine,
+                   os.path.join(args.output, "t1_orig.nii.gz"),
+                   dtype=np.float32)
+        print("  t1_orig.nii.gz       T1 original resolution (for viewer)")
+
     print("\n" + "=" * 60)
     print("Done!")
     print("=" * 60)
@@ -551,6 +557,12 @@ def run_dynamic(args):
                    os.path.join(args.output, "map_t1.nii.gz"),
                    dtype=np.float32)
         print("  map_t1.nii.gz        T1 underlay (resampled to PET space)")
+
+        # Also save original T1 at native resolution for viewer
+        save_nifti(t1_volume, t1_affine,
+                   os.path.join(args.output, "t1_orig.nii.gz"),
+                   dtype=np.float32)
+        print("  t1_orig.nii.gz       T1 original resolution (for viewer)")
 
     print("\n" + "=" * 60)
     print("Done!")

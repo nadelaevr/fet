@@ -267,21 +267,51 @@ class FETQtViewer(QtWidgets.QMainWindow):
         self.nx, self.ny, self.nz = self.shape = self.underlay.shape
         print(f"  Volume: {self.shape}  ({self.underlay_label})")
 
-        # ── Optional upsampling for display quality ──
+        # ── Use original T1 if available (saved by pipeline as t1_orig.nii.gz) ──
         disp_underlay = self.underlay
         disp_clusters = self.clusters
-        if self._upsample > 1:
-            print(f"  Upsampling {self._upsample}x for display...")
-            disp_underlay = zoom(self.underlay, (self._upsample, self._upsample, 1), order=3)
-            disp_clusters = zoom(
-                self.clusters.astype(np.float32),
-                (self._upsample, self._upsample, 1), order=0
-            ).astype(np.int8)
-            self._disp_nx = self.nx * self._upsample
-            self._disp_ny = self.ny * self._upsample
+        tbr_display = self.tbr_volumes if self.mode == "static" else None
+        self._orig_nx, self._orig_ny = self.nx, self.ny  # PET resolution for queries
+
+        t1_orig_path = os.path.join(output_dir, "t1_orig.nii.gz")
+        if os.path.exists(t1_orig_path):
+            print("  Found t1_orig.nii.gz — using native T1 resolution for display")
+            t1_native = load_vol(t1_orig_path)
+            tnx, tny, tnz = t1_native.shape
+            if tnz == self.nz:
+                disp_underlay = t1_native
+                zoom_xy = (tnx / self.nx, tny / self.ny)
+                print(f"    T1 native: ({tnx}, {tny}, {tnz}), zoom factors: {zoom_xy}")
+                disp_clusters = zoom(
+                    self.clusters.astype(np.float32),
+                    (zoom_xy[0], zoom_xy[1], 1), order=0
+                ).astype(np.int8)
+                if tbr_display is not None:
+                    tbr_display = zoom(tbr_display, (zoom_xy[0], zoom_xy[1], 1, 1), order=1)
+                self._disp_nx, self._disp_ny = tnx, tny
+            else:
+                print(f"    WARNING: T1 z={tnz} != PET z={self.nz}, falling back to resampled T1")
+                self._disp_nx, self._disp_ny = self.nx, self.ny
         else:
-            self._disp_nx = self.nx
-            self._disp_ny = self.ny
+            # No native T1 — use upsampling if requested
+            if self._upsample > 1:
+                print(f"  Upsampling {self._upsample}x for display...")
+                disp_underlay = zoom(self.underlay, (self._upsample, self._upsample, 1), order=3)
+                disp_clusters = zoom(
+                    self.clusters.astype(np.float32),
+                    (self._upsample, self._upsample, 1), order=0
+                ).astype(np.int8)
+                if tbr_display is not None:
+                    tbr_display = zoom(tbr_display, (self._upsample, self._upsample, 1, 1), order=1)
+                self._disp_nx = self.nx * self._upsample
+                self._disp_ny = self.ny * self._upsample
+            else:
+                self._disp_nx = self.nx
+                self._disp_ny = self.ny
+
+        # Update tbr_volumes to display resolution for correct click queries
+        if tbr_display is not None:
+            self.tbr_volumes = tbr_display
 
         # ── Precompute underlay + overlay pixmaps (separated) ──
         print("  Precomputing slice pixmaps...")
