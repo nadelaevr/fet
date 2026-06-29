@@ -24,28 +24,22 @@ import numpy as np
 import nibabel as nib
 
 import matplotlib
-matplotlib.use("Qt5Agg")  # B: faster backend (was TkAgg)
+matplotlib.use("Qt5Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 
 
-# ── Cluster colours ──────────────────────────────────────────────────────
-CLUSTER_CMAP = {
-    0: (0.0, 0.0, 0.0, 0.0),       # background — transparent
-    1: (1.0, 0.2, 0.2, 0.5),       # rising — red
-    2: (0.2, 0.4, 1.0, 0.5),       # falling — blue
-    3: (0.2, 0.8, 0.2, 0.5),       # plateau — green
-}
+# ── Cluster colours (RGBA LUT for vectorised indexing) ──────────────────
+_COLOUR_LUT = np.array([
+    [0.0, 0.0, 0.0, 0.0],    # 0: background — transparent
+    [1.0, 0.2, 0.2, 0.5],    # 1: rising — red
+    [0.2, 0.4, 1.0, 0.5],    # 2: falling — blue
+    [0.2, 0.8, 0.2, 0.5],    # 3: plateau — green
+], dtype=np.float32)
 
 
 def load_vol(path: str) -> np.ndarray:
-    """Load a NIfTI file and reorient to canonical RAS.
-
-    After reorientation the array axes are (x, y, z) = (L-R, P-A, I-S),
-    so ``data[:, :, z]`` gives an axial slice.
-    All data from the same pipeline share the same affine, so canonical
-    reorientation is consistent across volumes.
-    """
+    """Load a NIfTI file and reorient to canonical RAS."""
     img = nib.load(path)
     canonical = nib.as_closest_canonical(img)
     return canonical.get_fdata().astype(np.float64)
@@ -63,24 +57,6 @@ def find_files(output_dir: str, names: list[str]) -> dict[str, str]:
             if os.path.exists(alt):
                 found[name] = alt
     return found
-
-
-def _overlay_slice(clusters: np.ndarray, z: int, cmap: dict) -> np.ndarray:
-    """Build a 2D RGBA overlay for a single axial slice z.
-
-    Returns (ny, nx, 4) float array in [0, 1], transposed+flipped
-    for imshow display (radiological convention).
-    """
-    sl = clusters[:, :, z]                      # (nx, ny) int8
-    rgba = np.zeros(sl.shape + (4,), dtype=np.float32)
-    for label, colour in cmap.items():
-        if label == 0:
-            continue
-        idx = sl == label
-        for c in range(4):
-            rgba[:, :, c][idx] = colour[c]
-    # Transpose (nx, ny, 4) → (ny, nx, 4), then fliplr for radiological
-    return np.fliplr(rgba.transpose(1, 0, 2))
 
 
 # ── Main viewer class ────────────────────────────────────────────────────
@@ -103,14 +79,16 @@ class FETViewer:
         params = self.report.get("parameters", {})
         self.mode = params.get("mode", self.report.get("mode", "static"))
 
-        # ── Time points ──
+        # ── Time points (safely ensure 1D array) ──
         if self.mode == "dynamic":
             tp = self.report.get("time_points_min",
                                  self.report.get("parameters", {}).get("time_points_min", []))
-            self.time_points = np.array(tp, dtype=float)
         else:
             tp = params.get("time_points_min", [20.0, 40.0, 60.0])
-            self.time_points = np.array(tp, dtype=float)
+        tp = np.asarray(tp, dtype=float).ravel()
+        if tp.ndim == 0 or tp.size == 0:
+            tp = np.array([20.0, 40.0, 60.0])
+        self.time_points = tp
 
         # ── Files ──
         if self.mode == "dynamic":
@@ -133,17 +111,16 @@ class FETViewer:
                 print(f"  - {f}")
             sys.exit(1)
 
-        # ── Load volumes (all reoriented to canonical RAS) ──
+        # ── Load volumes ──
         print("Loading data (canonical RAS)...")
 
-        # Always load TBR volumes first (curves need them)
         if self.mode == "static":
             tbrs = []
             for key in ["map_tbr_t20.nii.gz", "map_tbr_t40.nii.gz", "map_tbr_t60.nii.gz"]:
                 tbrs.append(load_vol(self.files[key]))
             self.tbr_volumes = np.stack(tbrs, axis=-1)  # (nx, ny, nz, 3)
 
-        # Underlay: T1 if available, otherwise mean TBR / TBRmax
+        # Underlay
         self.has_t1 = "map_t1.nii.gz" in self.files
         if self.has_t1:
             self.underlay = load_vol(self.files["map_t1.nii.gz"])
@@ -155,9 +132,7 @@ class FETViewer:
             self.underlay = np.mean(self.tbr_volumes, axis=-1)
             self.underlay_label = "TBR mean"
 
-        self.clusters = load_vol(
-            self.files["mask_clusters.nii.gz"]
-        ).astype(np.int8)
+        self.clusters = load_vol(self.files["mask_clusters.nii.gz"]).astype(np.int8)
 
         # ── Shape ──
         self.shape = self.underlay.shape
@@ -173,12 +148,21 @@ class FETViewer:
         if self.clusters.shape != self.shape:
             print(f"  WARNING: clusters shape {self.clusters.shape} != underlay {self.shape}")
 
-        # A: Precompute per-slice display range (2nd & 98th percentile of positive voxels)
-        print("  Precomputing per-slice display ranges...")
+        # ── Precompute ALL display-ready slices upfront ──
+        print("  Precomputing display slices...")
+        # Underlay: each slice = fliplr(data[:,:,z].T) → (ny, nx)
+        self._disp_underlay = np.zeros((self.nz, self.ny, self.nx), dtype=np.float64)
+        # Overlay: each slice = fliplr(LUT[clusters[:,:,z]].transpose(1,0,2)) → (ny, nx, 4)
+        self._disp_overlay = np.zeros((self.nz, self.ny, self.nx, 4), dtype=np.float32)
         self._vmin = np.zeros(self.nz, dtype=np.float64)
         self._vmax = np.zeros(self.nz, dtype=np.float64)
+
         for z in range(self.nz):
+            # Underlay
             sl = self.underlay[:, :, z]
+            self._disp_underlay[z] = np.fliplr(sl.T)
+
+            # Percentiles
             pos = sl[sl > 0]
             if pos.size > 0:
                 self._vmin[z] = np.percentile(pos, 2)
@@ -190,7 +174,11 @@ class FETViewer:
                 self._vmin[z] = sl.min()
                 self._vmax[z] = sl.max()
 
-        # ── Current slice (axial = axis 2 in canonical RAS) ──
+            # Overlay via vectorised LUT (no Python loops)
+            rgba = _COLOUR_LUT[self.clusters[:, :, z]]      # (nx, ny, 4)
+            self._disp_overlay[z] = np.fliplr(rgba.transpose(1, 0, 2))
+
+        # ── Current slice ──
         self.cur_z = self.nz // 2
 
         # ── Setup figure ──
@@ -198,25 +186,23 @@ class FETViewer:
         self.fig = plt.figure(title, figsize=(14, 7))
         self.fig.canvas.manager.set_window_title(title)
 
-        # Left: axial slice  (imshow: x=axis1, y=axis0)
+        # Left: axial slice
         self.ax_img = self.fig.add_axes([0.05, 0.1, 0.50, 0.80])
-        self.ax_img.set_title("Axial slice  (click for TBR curve)")
-
-        # A: Create imshow objects ONCE, update via set_data / set_clim
-        dummy = np.zeros((self.ny, self.nx), dtype=np.float64)
-        self.img_display = self.ax_img.imshow(
-            dummy, cmap="gray", vmin=0, vmax=1,
-            origin="lower", aspect="equal"
-        )
-        dummy_rgba = np.zeros((self.ny, self.nx, 4), dtype=np.float32)
-        self.overlay_display = self.ax_img.imshow(
-            dummy_rgba, origin="lower", aspect="equal"
-        )
-
+        self.ax_img.set_title("")
         self.ax_img.set_xlabel("X (R-L)")
         self.ax_img.set_ylabel("Y (P-A)")
 
-        # A: Persistent crosshair lines (avoids remove/recreate on each click)
+        # imshow objects created ONCE
+        self.img_display = self.ax_img.imshow(
+            self._disp_underlay[self.cur_z], cmap="gray",
+            vmin=self._vmin[self.cur_z], vmax=self._vmax[self.cur_z],
+            origin="lower", aspect="equal"
+        )
+        self.overlay_display = self.ax_img.imshow(
+            self._disp_overlay[self.cur_z], origin="lower", aspect="equal"
+        )
+
+        # Persistent crosshair
         self.cross_vline = self.ax_img.axvline(0, color="yellow", lw=0.8, alpha=0.6, visible=False)
         self.cross_hline = self.ax_img.axhline(0, color="yellow", lw=0.8, alpha=0.6, visible=False)
 
@@ -263,7 +249,6 @@ class FETViewer:
                 Rectangle((x0, 0.1), 0.04, 0.8, color=color, alpha=0.6)
             )
             self.ax_legend.text(x0 + 0.05, 0.5, name, va="center", fontsize=10)
-
         self.ax_legend.text(0.62, 0.5, f"Underlay: {self.underlay_label}",
                             va="center", fontsize=9, color="gray")
 
@@ -274,51 +259,44 @@ class FETViewer:
         self.fig.canvas.mpl_connect("motion_notify_event", self.on_hover)
 
         # ── Initial draw ──
-        self._update_slice()
+        self._update_title()
+        self.fig.canvas.draw_idle()
 
     # ── Drawing ──────────────────────────────────────────────────────────
 
-    def _get_underlay_slice(self) -> np.ndarray:
-        """Return current axial slice, transposed+flipped for display."""
-        return np.fliplr(self.underlay[:, :, self.cur_z].T)
-
-    def _update_slice(self):
-        """Update the axial slice display without recreating imshow objects.
-
-        Uses set_data() + set_clim() instead of clear() + imshow().
-        """
-        # A: Update underlay data + colour limits in-place
-        under = self._get_underlay_slice()
-        self.img_display.set_data(under)
-        self.img_display.set_clim(self._vmin[self.cur_z], self._vmax[self.cur_z])
-
-        # A: Build overlay slice on-the-fly (avoids storing full 4D RGBA volume)
-        ov = _overlay_slice(self.clusters, self.cur_z, CLUSTER_CMAP)
-        self.overlay_display.set_data(ov)
-
-        # Title
+    def _update_title(self):
         self.ax_img.set_title(
             f"Axial slice  z={self.cur_z}/{self.nz - 1}  "
             f"[{self.underlay_label}]  (click for TBR curve)"
         )
 
+    def _update_slice(self):
+        """Update axial slice — fast path using precomputed caches.
+
+        No numpy operations, no per-slice RGBA construction —
+        just set_data + set_clim on existing imshow objects.
+        """
+        z = self.cur_z
+        self.img_display.set_data(self._disp_underlay[z])
+        self.img_display.set_clim(self._vmin[z], self._vmax[z])
+        self.overlay_display.set_data(self._disp_overlay[z])
+        self._update_title()
         self.fig.canvas.draw_idle()
 
     def _update_curve(self, x: int, y: int, z: int):
         """Update the TBR curve plot for a given voxel."""
         if not self.has_curves:
             return
-
         if not (0 <= x < self.nx and 0 <= y < self.ny and 0 <= z < self.nz):
             return
 
-        tbr_vals = self.tbr_volumes[x, y, z, :]
-        cluster = self.clusters[x, y, z]
+        tbr_vals = np.asarray(self.tbr_volumes[x, y, z, :]).ravel()
+        cluster = int(self.clusters[x, y, z])
 
         label_map = {1: "Rising", 2: "Falling", 3: "Plateau", 0: "Background"}
 
         self.curve_line.set_data(self.time_points, tbr_vals)
-        self.ax_curve.set_ylim(0, max(tbr_vals.max() * 1.3, 2.0))
+        self.ax_curve.set_ylim(0, max(float(tbr_vals.max()) * 1.3, 2.0))
         self.curve_info.set_text(
             f"Voxel ({x}, {y}, {z})  "
             f"Cluster: {label_map.get(cluster, '?')}\n"
@@ -327,7 +305,7 @@ class FETViewer:
         self.fig.canvas.draw_idle()
 
     def _show_crosshair(self, x: int, y: int):
-        """Position persistent crosshair at display coords (dx, dy)."""
+        """Position persistent crosshair at display coords."""
         if x < 0 or y < 0:
             self.cross_vline.set_visible(False)
             self.cross_hline.set_visible(False)
@@ -365,9 +343,6 @@ class FETViewer:
         if event.xdata is None or event.ydata is None:
             return
 
-        # With canonical RAS, .T display, and fliplr (radiological):
-        #   flipped[row, col] = data[nx-1-col, row, z]
-        #   voxel_x = nx - 1 - xdata, voxel_y = ydata, voxel_z = cur_z
         dx = int(round(event.xdata))
         dy = int(round(event.ydata))
         vx, vy, vz = self.nx - 1 - dx, dy, self.cur_z
