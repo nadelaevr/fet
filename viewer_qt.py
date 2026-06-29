@@ -40,9 +40,17 @@ _CLUSTER_RGB = {   # alpha is controlled by slider
 # ── Data loading ─────────────────────────────────────────────────────────
 
 def load_vol(path: str) -> np.ndarray:
+    """Load a NIfTI file, reorient to canonical RAS, return data."""
     img = nib.load(path)
     canonical = nib.as_closest_canonical(img)
     return canonical.get_fdata().astype(np.float64)
+
+
+def load_vol_with_affine(path: str) -> tuple[np.ndarray, np.ndarray]:
+    """Load NIfTI, reorient to canonical RAS, return (data, affine)."""
+    img = nib.load(path)
+    canonical = nib.as_closest_canonical(img)
+    return canonical.get_fdata().astype(np.float64), canonical.affine
 
 
 def find_files(output_dir: str, names: list[str]) -> dict[str, str]:
@@ -263,7 +271,8 @@ class FETQtViewer(QtWidgets.QMainWindow):
             self.underlay = np.mean(self.tbr_volumes, axis=-1)
             self.underlay_label = "TBR mean"
 
-        self.clusters = load_vol(self.files["mask_clusters.nii.gz"]).astype(np.int8)
+        self.clusters, pet_affine = load_vol_with_affine(self.files["mask_clusters.nii.gz"])
+        self.clusters = self.clusters.astype(np.int8)
         self.nx, self.ny, self.nz = self.shape = self.underlay.shape
         print(f"  Volume: {self.shape}  ({self.underlay_label})")
 
@@ -276,28 +285,33 @@ class FETQtViewer(QtWidgets.QMainWindow):
         t1_orig_path = os.path.join(output_dir, "t1_orig.nii.gz")
         if os.path.exists(t1_orig_path):
             print("  Found t1_orig.nii.gz — using native T1 resolution for display")
-            t1_native = load_vol(t1_orig_path)
+            t1_native, t1_affine = load_vol_with_affine(t1_orig_path)
             tnx, tny, tnz = t1_native.shape
 
-            # Compute 3D zoom factors from PET to T1 space
-            zx, zy, zz = tnx / self.nx, tny / self.ny, tnz / self.nz
-            print(f"    T1 native: ({tnx}, {tny}, {tnz})  zoom=({zx:.2f}, {zy:.2f}, {zz:.2f})")
-
-            # Resample clusters to T1 grid (nearest-neighbour — preserves labels)
-            disp_clusters = zoom(
-                self.clusters.astype(np.float32),
-                (zx, zy, zz), order=0
-            ).astype(np.int8)
+            # Resample clusters to T1 grid using affine matrices
+            clusters_img = nib.Nifti1Image(
+                self.clusters.astype(np.int16), pet_affine
+            )
+            t1_img = nib.Nifti1Image(
+                np.zeros((tnx, tny, tnz), dtype=np.int16), t1_affine
+            )
+            from nibabel.processing import resample_from_to
+            resampled_img = resample_from_to(clusters_img, t1_img, order=0)
+            disp_clusters = np.asarray(resampled_img.dataobj).astype(np.int8)
 
             disp_underlay = t1_native
             self._disp_nx, self._disp_ny = tnx, tny
-            self._zoom_xy = (zx, zy)
-            self._zoom_z = zz
 
-            # Map each PET z to the best T1 slice
-            self._z_map = [min(max(int(round(z * zz)), 0), tnz - 1) for z in range(self.nz)]
-
-            # Keep TBR at PET resolution (too large to zoom) — convert coords on click
+            # Map each PET z to T1 z using physical coordinates
+            z_phys_pet = np.array([
+                nib.affines.apply_affine(pet_affine, [0, 0, z])[2]
+                for z in range(self.nz)
+            ])
+            z_phys_t1 = np.array([
+                nib.affines.apply_affine(t1_affine, [0, 0, z])[2]
+                for z in range(tnz)
+            ])
+            self._z_map = [int(np.argmin(np.abs(z_phys_t1 - zp))) for zp in z_phys_pet]
         else:
             # No native T1 — use upsampling if requested
             if self._upsample > 1:
