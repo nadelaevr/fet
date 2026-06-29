@@ -280,8 +280,8 @@ class FETViewer:
             self.cross_vline.set_visible(False)
             self.cross_hline.set_visible(False)
         else:
-            self.cross_vline.set_xdata(x)
-            self.cross_hline.set_ydata(y)
+            self.cross_vline.set_xdata([x, x])
+            self.cross_hline.set_ydata([y, y])
             self.cross_vline.set_visible(True)
             self.cross_hline.set_visible(True)
         self.fig.canvas.draw_idle()
