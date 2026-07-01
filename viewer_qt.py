@@ -442,26 +442,26 @@ class FETQtViewer(QtWidgets.QMainWindow):
         layout = QtWidgets.QHBoxLayout(central)
         layout.setContentsMargins(8, 8, 8, 8)
 
-        # ── Left: tabbed SliceView ──
-        self.tabs = QtWidgets.QTabWidget()
+        # ── Left: SliceView with tab bar above ──
+        left = QtWidgets.QWidget()
+        left_layout = QtWidgets.QVBoxLayout(left)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(0)
+
+        # Tab bar (selector only — view stays in one place)
+        self.tabs = QtWidgets.QTabBar()
+        self.tabs.addTab("T1 + Clusters")
+        self.tabs.addTab("T1 + TBRmax")
+        self.tabs.currentChanged.connect(self._on_tab_changed)
+        left_layout.addWidget(self.tabs)
+
+        # Single SliceView (not inside tabs)
         self.view = SliceView()
         self.view.set_data(self._underlay_pixmaps, self._cluster_pixmaps,
                            self.nx, self.ny, self.nz)
-        tab1 = QtWidgets.QWidget()
-        tab1_l = QtWidgets.QVBoxLayout(tab1)
-        tab1_l.setContentsMargins(0, 0, 0, 0)
-        tab1_l.addWidget(self.view)
-        self.tabs.addTab(tab1, "T1 + Clusters")
+        left_layout.addWidget(self.view, 2)
 
-        # Tab 2 (same view, swapped overlay)
-        tab2 = QtWidgets.QWidget()
-        tab2_l = QtWidgets.QVBoxLayout(tab2)
-        tab2_l.setContentsMargins(0, 0, 0, 0)
-        tab2_l.addWidget(self.view)  # same widget, will be re-parented
-        self.tabs.addTab(tab2, "T1 + TBRmax")
-
-        self.tabs.currentChanged.connect(self._on_tab_changed)
-        layout.addWidget(self.tabs, 2)
+        layout.addWidget(left, 2)
 
         # ── Right panel ──
         right = QtWidgets.QWidget()
