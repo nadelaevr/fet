@@ -574,29 +574,50 @@ class FETQtViewer(QtWidgets.QMainWindow):
         if self.has_t1 or self._use_native_t1:
             win_group = QtWidgets.QGroupBox("T1 Window")
             win_layout = QtWidgets.QVBoxLayout(win_group)
+
+            # Reference: show P5/P95 values
+            pos_vals = self._disp_underlay[self._disp_underlay > 0]
+            if pos_vals.size > 0:
+                ref_lo = float(np.percentile(pos_vals, 5))
+                ref_hi = float(np.percentile(pos_vals, 95))
+            else:
+                ref_lo = ref_hi = 0.0
+
             lo_row = QtWidgets.QHBoxLayout()
             lo_row.addWidget(QtWidgets.QLabel("Low%:"))
-            self._win_lo_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-            self._win_lo_slider.setRange(0, 95)
-            self._win_lo_slider.setValue(self._win_lo)
-            self._win_lo_label = QtWidgets.QLabel(f"{self._win_lo}%")
-            self._win_lo_label.setFixedWidth(35)
-            lo_row.addWidget(self._win_lo_slider)
-            lo_row.addWidget(self._win_lo_label)
+            self._win_lo_spin = QtWidgets.QDoubleSpinBox()
+            self._win_lo_spin.setRange(0, 95)
+            self._win_lo_spin.setValue(self._win_lo)
+            self._win_lo_spin.setSuffix("%")
+            self._win_lo_spin.setDecimals(1)
+            self._win_lo_spin.setSingleStep(1.0)
+            lo_row.addWidget(self._win_lo_spin)
+            lo_row.addWidget(QtWidgets.QLabel(f"({ref_lo:.1f})"))
+            lo_row.addStretch()
             win_layout.addLayout(lo_row)
+
             hi_row = QtWidgets.QHBoxLayout()
             hi_row.addWidget(QtWidgets.QLabel("High%:"))
-            self._win_hi_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-            self._win_hi_slider.setRange(5, 100)
-            self._win_hi_slider.setValue(self._win_hi)
-            self._win_hi_label = QtWidgets.QLabel(f"{self._win_hi}%")
-            self._win_hi_label.setFixedWidth(35)
-            hi_row.addWidget(self._win_hi_slider)
-            hi_row.addWidget(self._win_hi_label)
+            self._win_hi_spin = QtWidgets.QDoubleSpinBox()
+            self._win_hi_spin.setRange(5, 100)
+            self._win_hi_spin.setValue(self._win_hi)
+            self._win_hi_spin.setSuffix("%")
+            self._win_hi_spin.setDecimals(1)
+            self._win_hi_spin.setSingleStep(1.0)
+            hi_row.addWidget(self._win_hi_spin)
+            hi_row.addWidget(QtWidgets.QLabel(f"({ref_hi:.1f})"))
+            hi_row.addStretch()
             win_layout.addLayout(hi_row)
+
+            self._t1_ref_label = QtWidgets.QLabel(
+                f"<span style='color:#888;font-size:11px;'>"
+                f"Ref: P5={ref_lo:.1f}, P95={ref_hi:.1f}, "
+                f"max={float(np.max(pos_vals)):.1f}</span>")
+            win_layout.addWidget(self._t1_ref_label)
+
             right_layout.addWidget(win_group)
-            self._win_lo_slider.valueChanged.connect(self._on_window_changed)
-            self._win_hi_slider.valueChanged.connect(self._on_window_changed)
+            self._win_lo_spin.valueChanged.connect(self._on_window_changed)
+            self._win_hi_spin.valueChanged.connect(self._on_window_changed)
 
         # ── Opacity slider ──
         opacity_w = QtWidgets.QWidget()
@@ -617,33 +638,43 @@ class FETQtViewer(QtWidgets.QMainWindow):
 
         # ── TBRmax Window controls ──
         if self.tbrmax_vol is not None:
+            tbr_pos = self._disp_tbrmax[self._disp_tbrmax > 0]
+            tbr_ref_max = float(np.max(tbr_pos)) if tbr_pos.size > 0 else 5.0
+            tbr_ref_p95 = float(np.percentile(tbr_pos, 95)) if tbr_pos.size > 0 else 5.0
+            self._tbr_vmin = 0.0
+            self._tbr_vmax = tbr_ref_max
+
             tbr_group = QtWidgets.QGroupBox("TBRmax Range")
             tbr_layout = QtWidgets.QVBoxLayout(tbr_group)
             tbr_lo_row = QtWidgets.QHBoxLayout()
             tbr_lo_row.addWidget(QtWidgets.QLabel("Min:"))
-            self._tbr_lo_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-            self._tbr_lo_slider.setRange(0, 100)
-            self._tbr_lo_slider.setValue(0)
-            self._tbr_lo_label = QtWidgets.QLabel("0.0")
-            self._tbr_lo_label.setFixedWidth(35)
-            tbr_lo_row.addWidget(self._tbr_lo_slider)
-            tbr_lo_row.addWidget(self._tbr_lo_label)
+            self._tbr_lo_spin = QtWidgets.QDoubleSpinBox()
+            self._tbr_lo_spin.setRange(0, tbr_ref_max)
+            self._tbr_lo_spin.setValue(0.0)
+            self._tbr_lo_spin.setDecimals(2)
+            self._tbr_lo_spin.setSingleStep(0.1)
+            tbr_lo_row.addWidget(self._tbr_lo_spin)
+            tbr_lo_row.addStretch()
             tbr_layout.addLayout(tbr_lo_row)
             tbr_hi_row = QtWidgets.QHBoxLayout()
             tbr_hi_row.addWidget(QtWidgets.QLabel("Max:"))
-            self._tbr_hi_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-            self._tbr_hi_slider.setRange(0, 100)
-            self._tbr_hi_slider.setValue(100)
-            self._tbr_hi_label = QtWidgets.QLabel("5.0")
-            self._tbr_hi_label.setFixedWidth(35)
-            tbr_hi_row.addWidget(self._tbr_hi_slider)
-            tbr_hi_row.addWidget(self._tbr_hi_label)
+            self._tbr_hi_spin = QtWidgets.QDoubleSpinBox()
+            self._tbr_hi_spin.setRange(0.1, tbr_ref_max * 2)
+            self._tbr_hi_spin.setValue(tbr_ref_max)
+            self._tbr_hi_spin.setDecimals(2)
+            self._tbr_hi_spin.setSingleStep(0.1)
+            tbr_hi_row.addWidget(self._tbr_hi_spin)
+            tbr_hi_row.addStretch()
             tbr_layout.addLayout(tbr_hi_row)
+
+            self._tbr_ref_label = QtWidgets.QLabel(
+                f"<span style='color:#888;font-size:11px;'>"
+                f"Ref: max={tbr_ref_max:.2f}, P95={tbr_ref_p95:.2f}</span>")
+            tbr_layout.addWidget(self._tbr_ref_label)
+
             right_layout.addWidget(tbr_group)
-            self._tbr_lo_slider.valueChanged.connect(self._on_tbrmax_window_changed)
-            self._tbr_hi_slider.valueChanged.connect(self._on_tbrmax_window_changed)
-            self._tbr_vmin = 0.0
-            self._tbr_vmax = 5.0
+            self._tbr_lo_spin.valueChanged.connect(self._on_tbrmax_window_changed)
+            self._tbr_hi_spin.valueChanged.connect(self._on_tbrmax_window_changed)
 
         # Legend
         legend_w = QtWidgets.QWidget()
@@ -670,36 +701,30 @@ class FETQtViewer(QtWidgets.QMainWindow):
         self._refresh_overlay()
 
     def _on_window_changed(self):
-        lo = self._win_lo_slider.value()
-        hi = self._win_hi_slider.value()
-        # Swap if inverted (allow crossing for smooth UX)
+        lo = self._win_lo_spin.value()
+        hi = self._win_hi_spin.value()
         if lo >= hi:
-            lo, hi = hi, lo
-        if hi - lo < 1:
             return
         self._win_lo = lo
         self._win_hi = hi
-        self._win_lo_label.setText(f"{lo}%")
-        self._win_hi_label.setText(f"{hi}%")
-        self._update_current_slice()
+        self._build_pixmaps()
+        self._refresh_overlay()
+        self.view._show_slice()
 
     def _on_opacity_changed(self, value: int):
         self.view.set_overlay_opacity(value / 100.0)
         self.opacity_label.setText(f"{value}%")
 
     def _on_tbrmax_window_changed(self):
-        lo = self._tbr_lo_slider.value()
-        hi = self._tbr_hi_slider.value()
-        if lo >= hi:
-            lo, hi = hi, lo
-        if hi - lo < 1:
+        lo = self._tbr_lo_spin.value()
+        hi = self._tbr_hi_spin.value()
+        if hi <= lo:
             return
-        tmax = max(float(np.max(self._disp_tbrmax)), 0.1)
-        self._tbr_vmin = lo / 100.0 * tmax
-        self._tbr_vmax = hi / 100.0 * tmax
-        self._tbr_lo_label.setText(f"{self._tbr_vmin:.1f}")
-        self._tbr_hi_label.setText(f"{self._tbr_vmax:.1f}")
-        self._update_current_slice()
+        self._tbr_vmin = lo
+        self._tbr_vmax = hi
+        self._build_pixmaps()
+        self._refresh_overlay()
+        self.view._show_slice()
 
     def _on_slice_changed(self, z: int):
         self._cur_z = z
