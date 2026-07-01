@@ -7,10 +7,12 @@ Usage:
 
 Controls:
     Mouse wheel / Up/Down  — scroll slices
-    Click on image         — show TBR(t) curve
+    Click on image         — show TBR(t) curve + voxel info
     R                      — reset crosshair
     Q / Escape             — quit
-    Opacity slider         — adjust cluster overlay transparency
+    Tab 1                  — T1 + Clusters overlay
+    Tab 2                  — T1 + TBRmax overlay
+    Opacity slider         — adjust overlay transparency
     Window sliders         — adjust T1 brightness/contrast
 """
 
@@ -32,11 +34,13 @@ from matplotlib.figure import Figure
 from scipy.ndimage import zoom
 
 # ── Cluster colours ──────────────────────────────────────────────────────
-_CLUSTER_RGB = {   # alpha is controlled by slider
+_CLUSTER_RGB = {
     1: (255, 51,  51),    # rising  — red
     2: (51,  102, 255),   # falling — blue
     3: (51,  204, 51),    # plateau — green
 }
+
+# ── TBRmax colormap (jet-like, vectorized in _build_pixmaps) ────────────
 
 
 # ── Data loading ─────────────────────────────────────────────────────────
@@ -70,8 +74,8 @@ def find_files(output_dir: str, names: list[str]) -> dict[str, str]:
 
 class SliceView(QtWidgets.QGraphicsView):
     slice_changed = QtCore.pyqtSignal(int)
-    voxel_clicked = QtCore.pyqtSignal(int, int, int, int, int)  # vx, vy, vz, dx, dy
-    voxel_hovered = QtCore.pyqtSignal(int, int, int, int, int)  # vx, vy, vz, dx, dy
+    voxel_clicked = QtCore.pyqtSignal(int, int, int, int, int)
+    voxel_hovered = QtCore.pyqtSignal(int, int, int, int, int)
 
     def __init__(self):
         super().__init__()
@@ -116,14 +120,21 @@ class SliceView(QtWidgets.QGraphicsView):
         self._underlay_pixmaps = underlay_pixmaps
         self._overlay_pixmaps = overlay_pixmaps
         self._nz = nz
-        self._cur_z = nz // 2
+        self._cur_z = min(self._cur_z, nz - 1) if nz > 0 else 0
+        self._show_slice()
+
+    def swap_overlay(self, overlay_pixmaps: list):
+        """Swap overlay pixmaps without changing slice."""
+        self._overlay_pixmaps = overlay_pixmaps
         self._show_slice()
 
     def _show_slice(self):
         if not self._underlay_pixmaps:
             return
-        self._underlay_item.setPixmap(self._underlay_pixmaps[self._cur_z])
-        self._overlay_item.setPixmap(self._overlay_pixmaps[self._cur_z])
+        z = min(self._cur_z, len(self._underlay_pixmaps) - 1)
+        self._underlay_item.setPixmap(self._underlay_pixmaps[z])
+        if z < len(self._overlay_pixmaps):
+            self._overlay_item.setPixmap(self._overlay_pixmaps[z])
         self._scene.setSceneRect(self._underlay_item.boundingRect())
         self.fitInView(self._underlay_item, QtCore.Qt.KeepAspectRatio)
         self.slice_changed.emit(self._cur_z)
@@ -219,13 +230,12 @@ class FETQtViewer(QtWidgets.QMainWindow):
         else:
             self._late_mask = None
 
+        # ── Load data files ──
         if self.mode == "dynamic":
-            # Try loading 4D TBR for interactive curves
             tbr_4d_path = os.path.join(output_dir, "tbr_4d.nii.gz")
             if os.path.exists(tbr_4d_path):
                 print("  Loading 4D TBR for dynamic curves...")
-                tbr_4d = load_vol(tbr_4d_path)  # shape (X, Y, Z, T)
-                self.tbr_volumes = tbr_4d
+                self.tbr_volumes = load_vol(tbr_4d_path)
                 self.has_curves = True
             else:
                 self.has_curves = False
@@ -234,7 +244,8 @@ class FETQtViewer(QtWidgets.QMainWindow):
             self.has_curves = True
             required = ["map_tbr_t20.nii.gz", "map_tbr_t40.nii.gz", "map_tbr_t60.nii.gz",
                         "mask_clusters.nii.gz"]
-        optional = ["map_t1.nii.gz", "map_sulmax.nii.gz", "mask_brain.nii.gz"]
+        optional = ["map_t1.nii.gz", "map_sulmax.nii.gz", "map_slope.nii.gz",
+                    "map_tbrmax.nii.gz", "mask_brain.nii.gz"]
 
         self.files = find_files(output_dir, required + optional)
         missing = [f for f in required if f not in self.files]
@@ -248,6 +259,7 @@ class FETQtViewer(QtWidgets.QMainWindow):
                     ["map_tbr_t20.nii.gz", "map_tbr_t40.nii.gz", "map_tbr_t60.nii.gz"]]
             self.tbr_volumes = np.stack(tbrs, axis=-1)
 
+        # Load underlay
         self.has_t1 = "map_t1.nii.gz" in self.files
         if self.has_t1:
             self.underlay = load_vol(self.files["map_t1.nii.gz"])
@@ -259,20 +271,30 @@ class FETQtViewer(QtWidgets.QMainWindow):
             self.underlay = np.mean(self.tbr_volumes, axis=-1)
             self.underlay_label = "TBR mean"
 
+        # Load cluster mask
         self.clusters, pet_affine = load_vol_with_affine(self.files["mask_clusters.nii.gz"])
         self.clusters = self.clusters.astype(np.int8)
         self.nx, self.ny, self.nz = self.shape = self.underlay.shape
         print(f"  Volume: {self.shape}  ({self.underlay_label})")
-        print(f"  Clusters shape: {self.clusters.shape}, unique: {np.unique(self.clusters)}")
+
+        # Load optional maps for voxel info
+        self.sulmax_vol = load_vol(self.files["map_sulmax.nii.gz"]) if "map_sulmax.nii.gz" in self.files else None
+        self.tbrmax_vol = load_vol(self.files["map_tbrmax.nii.gz"]) if "map_tbrmax.nii.gz" in self.files else None
+        self.slope_vol = load_vol(self.files["map_slope.nii.gz"]) if "map_slope.nii.gz" in self.files else None
+
+        # Report params for voxel info
+        self._time_span = params.get("time_span_min", 40.0)
+        self._tbr_delta_thr = params.get("tbr_delta_threshold", 0.3)
 
         # ── Window defaults ──
-        self._win_lo = 5    # low percentile
-        self._win_hi = 95   # high percentile
+        self._win_lo = 5
+        self._win_hi = 95
 
         # ── Detect native T1 ──
         self._use_native_t1 = False
         self._disp_underlay = self.underlay
         self._disp_clusters = self.clusters
+        self._disp_tbrmax = self.tbrmax_vol if self.tbrmax_vol is not None else self.underlay
         self._z_map = None
         self._disp_nx, self._disp_ny = self.nx, self.ny
         self._orig_nx, self._orig_ny = self.nx, self.ny
@@ -288,12 +310,18 @@ class FETQtViewer(QtWidgets.QMainWindow):
             self._disp_underlay = t1_native
             self._disp_nx, self._disp_ny = tnx, tny
 
-            # Affine-based resample clusters to T1 grid (correct visual alignment)
+            # Resample clusters to T1 grid
             clusters_img = nib.Nifti1Image(self.clusters.astype(np.int16), pet_affine)
             t1_img = nib.Nifti1Image(np.zeros((tnx, tny, tnz), dtype=np.int16), t1_affine)
             from nibabel.processing import resample_from_to
             resampled_img = resample_from_to(clusters_img, t1_img, order=0)
             self._disp_clusters = np.asarray(resampled_img.dataobj).astype(np.int8)
+
+            # Resample TBRmax to T1 grid if available
+            if self.tbrmax_vol is not None:
+                tbrmax_img = nib.Nifti1Image(self.tbrmax_vol.astype(np.float32), pet_affine)
+                tbrmax_resampled = resample_from_to(tbrmax_img, t1_img, order=1)
+                self._disp_tbrmax = np.asarray(tbrmax_resampled.dataobj).astype(np.float64)
 
             # Physical z mapping
             z_phys_pet = np.array([nib.affines.apply_affine(pet_affine, [0, 0, z])[2]
@@ -309,10 +337,13 @@ class FETQtViewer(QtWidgets.QMainWindow):
                 self.clusters.astype(np.float32),
                 (self._upsample, self._upsample, 1), order=0
             ).astype(np.int8)
+            if self.tbrmax_vol is not None:
+                self._disp_tbrmax = zoom(self.tbrmax_vol, (self._upsample, self._upsample, 1), order=1)
             self._disp_nx = self.nx * self._upsample
             self._disp_ny = self.ny * self._upsample
 
-        # ── Build pixmaps ──
+        # ── Build pixmaps (two sets: clusters + tbrmax) ──
+        self._overlay_mode = "clusters"  # or "tbrmax"
         self._build_pixmaps()
 
         # ── UI ──
@@ -327,15 +358,16 @@ class FETQtViewer(QtWidgets.QMainWindow):
 
     def _build_pixmaps(self):
         print("  Building slice pixmaps...")
-        underlay_pixmaps = []
-        overlay_pixmaps = []
+        self._underlay_pixmaps = []
+        self._cluster_pixmaps = []
+        self._tbrmax_pixmaps = []
 
         for z in range(self.nz):
             tz = self._z_map[z] if self._z_map else z
             sl = self._disp_underlay[:, :, tz]
             csl_raw = self._disp_clusters[:, :, tz]
+            tsl_raw = self._disp_tbrmax[:, :, tz]
 
-            # Percentile windowing
             pos = sl[sl > 0]
             if pos.size > 0:
                 vmin = np.percentile(pos, self._win_lo)
@@ -347,6 +379,7 @@ class FETQtViewer(QtWidgets.QMainWindow):
 
             disp_sl = np.flipud(np.fliplr(sl.T))
             csl = np.flipud(np.fliplr(csl_raw.T))
+            tsl = np.flipud(np.fliplr(tsl_raw.T))
 
             norm = np.clip((disp_sl - vmin) / (vmax - vmin) * 255, 0, 255).astype(np.uint8)
             under_rgba = np.zeros((self._disp_ny, self._disp_nx, 4), dtype=np.uint8)
@@ -356,8 +389,9 @@ class FETQtViewer(QtWidgets.QMainWindow):
             under_rgba[:, :, 3] = 255
             qimg = QtGui.QImage(under_rgba.tobytes(), self._disp_nx, self._disp_ny,
                                 self._disp_nx * 4, QtGui.QImage.Format_RGBA8888)
-            underlay_pixmaps.append(QtGui.QPixmap.fromImage(qimg))
+            self._underlay_pixmaps.append(QtGui.QPixmap.fromImage(qimg))
 
+            # Cluster overlay
             over_rgba = np.zeros((self._disp_ny, self._disp_nx, 4), dtype=np.uint8)
             for label, (r, g, b) in _CLUSTER_RGB.items():
                 mask = csl == label
@@ -367,34 +401,69 @@ class FETQtViewer(QtWidgets.QMainWindow):
                 over_rgba[mask, 3] = 200
             qimg2 = QtGui.QImage(over_rgba.tobytes(), self._disp_nx, self._disp_ny,
                                  self._disp_nx * 4, QtGui.QImage.Format_RGBA8888)
-            overlay_pixmaps.append(QtGui.QPixmap.fromImage(qimg2))
+            self._cluster_pixmaps.append(QtGui.QPixmap.fromImage(qimg2))
 
-        self._underlay_pixmaps = underlay_pixmaps
-        self._overlay_pixmaps = overlay_pixmaps
+            # TBRmax overlay (vectorized)
+            tbr_rgba = np.zeros((self._disp_ny, self._disp_nx, 4), dtype=np.uint8)
+            tmax = max(float(np.max(tsl)) if np.any(tsl > 0) else 5.0, 1.0)
+            tnorm = np.clip(tsl / tmax, 0, 1)
+            # jet-like: 0→blue, .25→cyan, .5→green, .75→yellow, 1→red
+            r = np.where(tnorm < 0.75, np.clip(tnorm / 0.75 * 255, 0, 255), 255)
+            g = np.where(tnorm < 0.5, 255, np.where(tnorm < 0.75, 255, np.clip((1 - (tnorm - 0.75) / 0.25) * 255, 0, 255)))
+            b = np.where(tnorm < 0.25, 255, np.where(tnorm < 0.5, np.clip((1 - (tnorm - 0.25) / 0.25) * 255, 0, 255), 0))
+            a = np.where(tsl > 0, 200, 0)
+            tbr_rgba[:, :, 0] = r.astype(np.uint8)
+            tbr_rgba[:, :, 1] = g.astype(np.uint8)
+            tbr_rgba[:, :, 2] = b.astype(np.uint8)
+            tbr_rgba[:, :, 3] = a.astype(np.uint8)
+            qimg3 = QtGui.QImage(tbr_rgba.tobytes(), self._disp_nx, self._disp_ny,
+                                 self._disp_nx * 4, QtGui.QImage.Format_RGBA8888)
+            self._tbrmax_pixmaps.append(QtGui.QPixmap.fromImage(qimg3))
+
         self._cur_z = self.nz // 2
 
     def _apply_window(self):
-        """Rebuild pixmaps with updated window and refresh view."""
         self._build_pixmaps()
-        self.view.set_data(self._underlay_pixmaps, self._overlay_pixmaps,
-                           self.nx, self.ny, self.nz)
+        self._refresh_overlay()
+
+    def _refresh_overlay(self):
+        """Swap overlay pixmaps based on current tab."""
+        ov = self._tbrmax_pixmaps if self._overlay_mode == "tbrmax" else self._cluster_pixmaps
+        self.view.swap_overlay(ov)
 
     # ── UI builder ───────────────────────────────────────────────────────
 
     def _build_ui(self):
         self.setWindowTitle(f"FET Viewer — {os.path.basename(self.output_dir)}")
-        self.setMinimumSize(1200, 700)
+        self.setMinimumSize(1200, 750)
 
         central = QtWidgets.QWidget()
         self.setCentralWidget(central)
         layout = QtWidgets.QHBoxLayout(central)
         layout.setContentsMargins(8, 8, 8, 8)
 
+        # ── Left: tabbed SliceView ──
+        self.tabs = QtWidgets.QTabWidget()
         self.view = SliceView()
-        self.view.set_data(self._underlay_pixmaps, self._overlay_pixmaps,
+        self.view.set_data(self._underlay_pixmaps, self._cluster_pixmaps,
                            self.nx, self.ny, self.nz)
-        layout.addWidget(self.view, 2)
+        tab1 = QtWidgets.QWidget()
+        tab1_l = QtWidgets.QVBoxLayout(tab1)
+        tab1_l.setContentsMargins(0, 0, 0, 0)
+        tab1_l.addWidget(self.view)
+        self.tabs.addTab(tab1, "T1 + Clusters")
 
+        # Tab 2 (same view, swapped overlay)
+        tab2 = QtWidgets.QWidget()
+        tab2_l = QtWidgets.QVBoxLayout(tab2)
+        tab2_l.setContentsMargins(0, 0, 0, 0)
+        tab2_l.addWidget(self.view)  # same widget, will be re-parented
+        self.tabs.addTab(tab2, "T1 + TBRmax")
+
+        self.tabs.currentChanged.connect(self._on_tab_changed)
+        layout.addWidget(self.tabs, 2)
+
+        # ── Right panel ──
         right = QtWidgets.QWidget()
         right_layout = QtWidgets.QVBoxLayout(right)
         right_layout.setContentsMargins(0, 0, 0, 0)
@@ -407,58 +476,57 @@ class FETQtViewer(QtWidgets.QMainWindow):
 
         # TBR curve
         if self.has_curves:
-            self.fig = Figure(figsize=(5, 4), dpi=100)
+            self.fig = Figure(figsize=(5, 3.5), dpi=100)
             self.canvas = FigureCanvas(self.fig)
             self.ax = self.fig.add_subplot(111)
-            self.ax.set_title("TBR(t) at clicked voxel")
+            self.ax.set_title("TBR(t) — click a voxel")
             self.ax.set_xlabel("Time (min)")
             self.ax.set_ylabel("TBR")
             self.ax.grid(True, alpha=0.3)
-            self.curve_line, = self.ax.plot([], [], "o-", color="#e74c3c", lw=2.5, ms=14,
+            self.curve_line, = self.ax.plot([], [], "o-", color="#e74c3c", lw=2.5, ms=10,
                                              markeredgecolor="#c0392b", markeredgewidth=1.5)
+            self.trend_line, = self.ax.plot([], [], "--", color="#555", lw=1.5, alpha=0.8)
             self.ax.set_xlim(min(self.time_points) - 5, max(self.time_points) + 5)
             self.ax.set_ylim(0, 5)
             self.fig.tight_layout()
             right_layout.addWidget(self.canvas, 1)
         else:
-            no_curve = QtWidgets.QLabel(
-                "Dynamic mode:\nmulti-frame TBR not saved.\n\n"
-                "Use static mode for interactive TBR plots.")
+            no_curve = QtWidgets.QLabel("No TBR curves available.")
             no_curve.setAlignment(QtCore.Qt.AlignCenter)
             no_curve.setStyleSheet("color: #888; font-size: 13px;")
             right_layout.addWidget(no_curve, 1)
+
+        # Voxel info panel
+        self.voxel_info = QtWidgets.QLabel("Click a voxel for details.")
+        self.voxel_info.setStyleSheet(
+            "font-size: 12px; padding: 8px; background: #f5f5f5; "
+            "border: 1px solid #ddd; border-radius: 4px;")
+        self.voxel_info.setWordWrap(True)
+        right_layout.addWidget(self.voxel_info)
 
         # ── T1 Window controls ──
         if self.has_t1 or self._use_native_t1:
             win_group = QtWidgets.QGroupBox("T1 Window")
             win_layout = QtWidgets.QVBoxLayout(win_group)
-
-            # Low percentile
             lo_row = QtWidgets.QHBoxLayout()
             lo_row.addWidget(QtWidgets.QLabel("Low%:"))
             self._win_lo_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
             self._win_lo_slider.setRange(0, 40)
             self._win_lo_slider.setValue(self._win_lo)
-            self._win_lo_slider.setTickInterval(5)
             self._win_lo_label = QtWidgets.QLabel(f"{self._win_lo}%")
             lo_row.addWidget(self._win_lo_slider)
             lo_row.addWidget(self._win_lo_label)
             win_layout.addLayout(lo_row)
-
-            # High percentile
             hi_row = QtWidgets.QHBoxLayout()
             hi_row.addWidget(QtWidgets.QLabel("High%:"))
             self._win_hi_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
             self._win_hi_slider.setRange(60, 100)
             self._win_hi_slider.setValue(self._win_hi)
-            self._win_hi_slider.setTickInterval(5)
             self._win_hi_label = QtWidgets.QLabel(f"{self._win_hi}%")
             hi_row.addWidget(self._win_hi_slider)
             hi_row.addWidget(self._win_hi_label)
             win_layout.addLayout(hi_row)
-
             right_layout.addWidget(win_group)
-
             self._win_lo_slider.valueChanged.connect(self._on_window_changed)
             self._win_hi_slider.valueChanged.connect(self._on_window_changed)
 
@@ -499,11 +567,15 @@ class FETQtViewer(QtWidgets.QMainWindow):
 
     # ── Slots ──
 
+    def _on_tab_changed(self, idx: int):
+        self._overlay_mode = "tbrmax" if idx == 1 else "clusters"
+        self._refresh_overlay()
+
     def _on_window_changed(self):
         self._win_lo = self._win_lo_slider.value()
         self._win_hi = self._win_hi_slider.value()
         if self._win_lo >= self._win_hi:
-            return  # invalid, wait for user to adjust
+            return
         self._win_lo_label.setText(f"{self._win_lo}%")
         self._win_hi_label.setText(f"{self._win_hi}%")
         self._apply_window()
@@ -516,35 +588,37 @@ class FETQtViewer(QtWidgets.QMainWindow):
         self._cur_z = z
         self._update_info()
 
+    def _pet_coords_from_display(self, dx: int, dy: int, vz: int) -> tuple:
+        """Map display coords to PET voxel coords."""
+        if self._use_native_t1:
+            t1_x = self._disp_nx - 1 - dx
+            t1_y = self._disp_ny - 1 - dy
+            tz = self._z_map[vz] if self._z_map else vz
+            phys = nib.affines.apply_affine(self._t1_affine, [t1_x, t1_y, tz])
+            pet_float = np.linalg.inv(self._pet_affine) @ [phys[0], phys[1], phys[2], 1.0]
+            px = max(0, min(self.nx - 1, int(round(pet_float[0]))))
+            py = max(0, min(self.ny - 1, int(round(pet_float[1]))))
+            pz = max(0, min(self.nz - 1, int(round(pet_float[2]))))
+            return px, py, pz
+        return None, None, None
+
     def _on_voxel_clicked(self, vx: int, vy: int, vz: int, dx: int, dy: int):
         if not self.has_curves:
             return
 
-        # Cluster lookup: use display coords in T1-native space, PET coords otherwise
+        # Resolve PET coords + cluster
         if self._use_native_t1:
-            t1_x = self._disp_nx - 1 - dx   # reverse fliplr
-            t1_y = self._disp_ny - 1 - dy   # reverse flipud
-            tz = self._z_map[vz] if self._z_map else vz
-            cluster = int(self._disp_clusters[t1_x, t1_y, tz])
-
-            # TBR lookup via physical coordinate mapping (affine → affine)
-            phys = nib.affines.apply_affine(self._t1_affine, [t1_x, t1_y, tz])
-            pet_float = np.linalg.inv(self._pet_affine) @ [phys[0], phys[1], phys[2], 1.0]
-            px = int(round(pet_float[0]))
-            py = int(round(pet_float[1]))
-            pz = int(round(pet_float[2]))
-            px = max(0, min(self.nx - 1, px))
-            py = max(0, min(self.ny - 1, py))
-            pz = max(0, min(self.nz - 1, pz))
+            px, py, pz = self._pet_coords_from_display(dx, dy, vz)
             tbr_vals = self.tbr_volumes[px, py, pz, :]
+            cluster = int(self.clusters[px, py, pz])
         else:
+            px, py, pz = vx, vy, vz
             tbr_vals = self.tbr_volumes[vx, vy, vz, :]
             cluster = int(self.clusters[vx, vy, vz])
 
-        print(f"  Click: PET=({vx},{vy},{vz}) display=({dx},{dy}) cluster={cluster} tbr={tbr_vals}")
         label_map = {1: "Rising", 2: "Falling", 3: "Plateau", 0: "Background"}
 
-        # Apply late-frame mask for display (matches slope/classification window)
+        # Apply late-frame mask
         if self._late_mask is not None and len(tbr_vals) == len(self._late_mask):
             show_tp = list(np.array(self.time_points)[self._late_mask])
             show_tbr = list(np.array(tbr_vals)[self._late_mask])
@@ -552,14 +626,29 @@ class FETQtViewer(QtWidgets.QMainWindow):
             show_tp = self.time_points
             show_tbr = list(tbr_vals)
 
+        # Plot curve + trend line
         for txt in list(self.ax.texts):
             txt.remove()
-
         self.curve_line.set_data(show_tp, show_tbr)
+
+        # Linear regression trend
+        tp_arr = np.array(show_tp, dtype=float)
+        tbr_arr = np.array(show_tbr, dtype=float)
+        if len(tp_arr) >= 2:
+            tc = tp_arr - tp_arr.mean()
+            denom = np.sum(tc ** 2)
+            slope = np.sum(tc * (tbr_arr - tbr_arr.mean())) / denom if denom > 0 else 0.0
+            intercept = tbr_arr.mean() - slope * tp_arr.mean()
+            trend_y = slope * tp_arr + intercept
+            self.trend_line.set_data(tp_arr, trend_y)
+        else:
+            slope = 0.0
+            self.trend_line.set_data([], [])
+
         ymax = max(float(np.max(show_tbr)) * 1.3, 2.0)
         self.ax.set_ylim(0, ymax)
 
-        # Annotate: first 3 + last point (avoid clutter with many frames)
+        # Annotate key points
         idxs = [0, 1, 2] if len(show_tbr) <= 3 else [0, len(show_tbr) // 2, -1]
         for i in idxs:
             t, v = show_tp[i], show_tbr[i]
@@ -568,18 +657,32 @@ class FETQtViewer(QtWidgets.QMainWindow):
                              ha="center", fontsize=10, fontweight="bold",
                              color="#c0392b")
 
-        # Build TBR curve title
-        tbr_preview = " → ".join(f"{v:.2f}" for v in tbr_vals[:3])
-        if len(tbr_vals) > 3:
-            tbr_preview += f" … {tbr_vals[-1]:.2f}"
+        # Curve title
+        tbr_preview = " → ".join(f"{v:.2f}" for v in show_tbr[:3])
+        if len(show_tbr) > 3:
+            tbr_preview += f" … {show_tbr[-1]:.2f}"
         self.ax.set_title(
-            f"Voxel ({vx}, {vy}, {vz})  Cluster: {label_map.get(cluster, '?')}\n"
+            f"({px}, {py}, {pz})  {label_map.get(cluster, '?')}\n"
             f"TBR: {tbr_preview}")
         self.fig.tight_layout()
         self.canvas.draw_idle()
 
+        # ── Voxel info panel ──
+        sulmax_v = float(self.sulmax_vol[px, py, pz]) if self.sulmax_vol is not None else float(np.max(tbr_vals))
+        tbrmax_v = float(self.tbrmax_vol[px, py, pz]) if self.tbrmax_vol is not None else float(np.max(show_tbr))
+        slope_v = float(self.slope_vol[px, py, pz]) if self.slope_vol is not None else slope
+        delta_tbr = slope_v * self._time_span
+
+        cls_color = {1: "#e33", 2: "#33e", 3: "#3c3", 0: "#888"}.get(cluster, "#888")
+        self.voxel_info.setText(
+            f"<b>Voxel</b> ({px}, {py}, {pz})<br>"
+            f"<b>Cluster:</b> <span style='color:{cls_color};'>{label_map.get(cluster, '?')}</span><br>"
+            f"<b>SULmax:</b> {sulmax_v:.3f}<br>"
+            f"<b>TBRmax:</b> {tbrmax_v:.3f}<br>"
+            f"<b>Slope:</b> {slope_v:.6f} TBR/min<br>"
+            f"<b>ΔTBR:</b> {delta_tbr:+.4f} over {self._time_span:.1f} min")
+
     def _on_voxel_hovered(self, vx: int, vy: int, vz: int, dx: int, dy: int):
-        val = self.underlay[vx, vy, vz]
         if self._use_native_t1:
             t1_x = self._disp_nx - 1 - dx
             t1_y = self._disp_ny - 1 - dy
@@ -588,6 +691,7 @@ class FETQtViewer(QtWidgets.QMainWindow):
         else:
             cls = int(self.clusters[vx, vy, vz])
         label = {1: "R", 2: "F", 3: "P", 0: "-"}.get(cls, "?")
+        val = self.underlay[max(0, min(self.nx-1, vx)), max(0, min(self.ny-1, vy)), vz]
         self.statusBar().showMessage(
             f"({vx}, {vy}, {vz})  val={val:.3f}  cluster={label}  "
             f"z={vz}/{self.nz - 1}  |  {self.underlay_label}")
