@@ -213,7 +213,15 @@ class FETQtViewer(QtWidgets.QMainWindow):
         self.time_points = tp
 
         if self.mode == "dynamic":
-            self.has_curves = False
+            # Try loading 4D TBR for interactive curves
+            tbr_4d_path = os.path.join(output_dir, "tbr_4d.nii.gz")
+            if os.path.exists(tbr_4d_path):
+                print("  Loading 4D TBR for dynamic curves...")
+                tbr_4d = load_vol(tbr_4d_path)  # shape (X, Y, Z, T)
+                self.tbr_volumes = tbr_4d
+                self.has_curves = True
+            else:
+                self.has_curves = False
             required = ["map_slope.nii.gz", "map_tbrmax.nii.gz", "mask_clusters.nii.gz"]
         else:
             self.has_curves = True
@@ -536,15 +544,22 @@ class FETQtViewer(QtWidgets.QMainWindow):
         ymax = max(float(tbr_vals.max()) * 1.3, 2.0)
         self.ax.set_ylim(0, ymax)
 
-        for t, v in zip(self.time_points, tbr_vals):
+        # Annotate: first 3 + last point (avoid clutter with many frames)
+        idxs = [0, 1, 2] if len(tbr_vals) <= 3 else [0, len(tbr_vals) // 2, -1]
+        for i in idxs:
+            t, v = self.time_points[i], tbr_vals[i]
             self.ax.annotate(f"{v:.2f}", (t, v),
                              textcoords="offset points", xytext=(0, 12),
                              ha="center", fontsize=10, fontweight="bold",
                              color="#c0392b")
 
+        # Build TBR curve title
+        tbr_preview = " → ".join(f"{v:.2f}" for v in tbr_vals[:3])
+        if len(tbr_vals) > 3:
+            tbr_preview += f" … {tbr_vals[-1]:.2f}"
         self.ax.set_title(
             f"Voxel ({vx}, {vy}, {vz})  Cluster: {label_map.get(cluster, '?')}\n"
-            f"TBR: {tbr_vals[0]:.3f} → {tbr_vals[1]:.3f} → {tbr_vals[2]:.3f}")
+            f"TBR: {tbr_preview}")
         self.fig.tight_layout()
         self.canvas.draw_idle()
 

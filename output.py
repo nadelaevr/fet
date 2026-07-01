@@ -109,6 +109,7 @@ def save_dynamic_outputs(
     brain_mask: np.ndarray = None,
     sul_means: np.ndarray = None,
     time_points_min: np.ndarray = None,
+    tbr_4d: np.ndarray = None,
 ):
     """
     Save outputs for dynamic (4D) pipeline.
@@ -150,6 +151,13 @@ def save_dynamic_outputs(
     if time_points_min is not None:
         report["time_points_min"] = [round(float(t), 2) for t in time_points_min]
         report["n_frames"] = len(time_points_min)
+
+    # Save 4D TBR for interactive curve plotting in viewer
+    if tbr_4d is not None:
+        save_nifti(tbr_4d, affine,
+                   os.path.join(output_dir, "tbr_4d.nii.gz"),
+                   dtype=np.float32)
+        print("  tbr_4d.nii.gz       4D TBR (for interactive curves)")
 
     with open(os.path.join(output_dir, "report.json"), "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2, ensure_ascii=False)

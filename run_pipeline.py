@@ -520,11 +520,10 @@ def run_dynamic(args):
 
     classes = classify_curves_dynamic(slope_map, args.tbr_delta_threshold, time_span_min)
 
-    # Build significant mask: mean SUL across time > sul_threshold AND
-    # mean TBR across time > tbr_threshold
-    mean_sul = np.mean(sul_4d_proc, axis=3)
-    mean_tbr = np.mean(tbr_4d, axis=3)
-    sig_mask = (mean_sul > args.sul_threshold) & (mean_tbr > args.tbr_threshold)
+    # Build significant mask (matching static logic: max SUL, any TBR > threshold)
+    sul_max = np.max(sul_4d_proc, axis=3)
+    tbr_any_gt = np.any(tbr_4d > args.tbr_threshold, axis=3)
+    sig_mask = (sul_max > args.sul_threshold) & tbr_any_gt
 
     # Apply brain mask
     sig_mask = sig_mask & brain_mask
@@ -568,6 +567,8 @@ def run_dynamic(args):
             "smoothing": not args.no_smoothing,
             "smooth_sigma": args.smooth_sigma,
             "no_frame": args.no_frame,
+            "sul_threshold": args.sul_threshold,
+            "tbr_threshold": args.tbr_threshold,
             "patient_weight_kg": meta["patient_weight_kg"],
             "patient_height_cm": meta["patient_height_cm"],
             "patient_sex": meta["patient_sex"],
@@ -579,6 +580,8 @@ def run_dynamic(args):
             "n_rising": n_rising,
             "n_falling": n_falling,
             "n_plateau": n_plateau,
+            "n_sulmax_gt2": int(np.sum(sul_max > args.sul_threshold)),
+            "n_tbr_gt2": int(np.sum(tbr_any_gt)),
         },
     }
     for cid, cname in [(1, "rising"), (2, "falling"), (3, "plateau")]:
@@ -601,6 +604,7 @@ def run_dynamic(args):
         brain_mask=brain_mask,
         sul_means=sul_means,
         time_points_min=time_points_min,
+        tbr_4d=tbr_4d,
     )
 
     # Save T1 underlay if available
