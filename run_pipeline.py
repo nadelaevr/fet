@@ -646,6 +646,7 @@ def run_dynamic(args):
         sul_means=sul_means,
         time_points_min=time_points_min,
         tbr_4d=tbr_4d,
+        map_sulmax=sul_max,
     )
 
     # Save T1 underlay if available

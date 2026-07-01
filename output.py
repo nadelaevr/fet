@@ -110,6 +110,7 @@ def save_dynamic_outputs(
     sul_means: np.ndarray = None,
     time_points_min: np.ndarray = None,
     tbr_4d: np.ndarray = None,
+    map_sulmax: np.ndarray = None,
 ):
     """
     Save outputs for dynamic (4D) pipeline.
@@ -137,6 +138,11 @@ def save_dynamic_outputs(
 
     # TBRmax map
     save_nifti(map_tbrmax, affine, os.path.join(output_dir, "map_tbrmax.nii.gz"), dtype=np.float32)
+
+    # SULmax map (for viewer voxel info)
+    if map_sulmax is not None:
+        save_nifti(map_sulmax, affine, os.path.join(output_dir, "map_sulmax.nii.gz"), dtype=np.float32)
+        print("  map_sulmax.nii.gz     SULmax (for viewer info)")
 
     # Brain mask
     if brain_mask is not None:
