@@ -428,74 +428,10 @@ class FETQtViewer(QtWidgets.QMainWindow):
         self._build_pixmaps()
         self._refresh_overlay()
 
-    def _update_current_slice(self):
-        """Fast update: rebuild only current slice pixmaps."""
-        z = self._cur_z
-        tz = self._z_map[z] if self._z_map else z
-        sl = self._disp_underlay[:, :, tz]
-        csl_raw = self._disp_clusters[:, :, tz]
-        tsl_raw = self._disp_tbrmax[:, :, tz]
-
-        pos = sl[sl > 0]
-        if pos.size > 0:
-            vmin = np.percentile(pos, self._win_lo)
-            vmax = np.percentile(pos, self._win_hi)
-        else:
-            vmin, vmax = sl.min(), sl.max()
-        if vmax <= vmin:
-            vmin, vmax = sl.min(), sl.max()
-
-        disp_sl = np.flipud(np.fliplr(sl.T))
-        csl = np.flipud(np.fliplr(csl_raw.T))
-        tsl = np.flipud(np.fliplr(tsl_raw.T))
-
-        norm = np.clip((disp_sl - vmin) / (vmax - vmin) * 255, 0, 255).astype(np.uint8)
-        under_rgba = np.zeros((self._disp_ny, self._disp_nx, 4), dtype=np.uint8)
-        under_rgba[:, :, 0] = norm
-        under_rgba[:, :, 1] = norm
-        under_rgba[:, :, 2] = norm
-        under_rgba[:, :, 3] = 255
-        qimg = QtGui.QImage(under_rgba.tobytes(), self._disp_nx, self._disp_ny,
-                            self._disp_nx * 4, QtGui.QImage.Format_RGBA8888)
-        self._underlay_pixmaps[z] = QtGui.QPixmap.fromImage(qimg)
-
-        # Cluster overlay
-        over_rgba = np.zeros((self._disp_ny, self._disp_nx, 4), dtype=np.uint8)
-        for label, (r, g, b) in _CLUSTER_RGB.items():
-            mask = csl == label
-            over_rgba[mask, 0] = r
-            over_rgba[mask, 1] = g
-            over_rgba[mask, 2] = b
-            over_rgba[mask, 3] = 200
-        qimg2 = QtGui.QImage(over_rgba.tobytes(), self._disp_nx, self._disp_ny,
-                             self._disp_nx * 4, QtGui.QImage.Format_RGBA8888)
-        self._cluster_pixmaps[z] = QtGui.QPixmap.fromImage(qimg2)
-
-        # TBRmax overlay
-        tbr_rgba = np.zeros((self._disp_ny, self._disp_nx, 4), dtype=np.uint8)
-        tmax = max(float(np.max(tsl)) if np.any(tsl > 0) else 5.0, 1.0)
-        tvmin = getattr(self, '_tbr_vmin', 0.0)
-        tvmax = getattr(self, '_tbr_vmax', tmax)
-        tnorm = np.clip((tsl - tvmin) / (tvmax - tvmin + 1e-9), 0, 1)
-        r = np.where(tnorm < 0.75, np.clip(tnorm / 0.75 * 255, 0, 255), 255)
-        g = np.where(tnorm < 0.5, 255, np.where(tnorm < 0.75, 255, np.clip((1 - (tnorm - 0.75) / 0.25) * 255, 0, 255)))
-        b = np.where(tnorm < 0.25, 255, np.where(tnorm < 0.5, np.clip((1 - (tnorm - 0.25) / 0.25) * 255, 0, 255), 0))
-        a = np.where(tsl > 0, 200, 0)
-        tbr_rgba[:, :, 0] = r.astype(np.uint8)
-        tbr_rgba[:, :, 1] = g.astype(np.uint8)
-        tbr_rgba[:, :, 2] = b.astype(np.uint8)
-        tbr_rgba[:, :, 3] = a.astype(np.uint8)
-        qimg3 = QtGui.QImage(tbr_rgba.tobytes(), self._disp_nx, self._disp_ny,
-                             self._disp_nx * 4, QtGui.QImage.Format_RGBA8888)
-        self._tbrmax_pixmaps[z] = QtGui.QPixmap.fromImage(qimg3)
-
-        self._refresh_overlay()
-        self.view._show_slice()
-
     def _refresh_overlay(self):
-        """Swap overlay pixmaps based on current tab."""
+        """Swap overlay pixmaps based on current tab, also push updated underlay."""
         ov = self._tbrmax_pixmaps if self._overlay_mode == "tbrmax" else self._cluster_pixmaps
-        self.view.swap_overlay(ov)
+        self.view.set_data(self._underlay_pixmaps, ov, self.nx, self.ny, self.nz)
 
     # ── UI builder ───────────────────────────────────────────────────────
 
@@ -709,7 +645,6 @@ class FETQtViewer(QtWidgets.QMainWindow):
         self._win_hi = hi
         self._build_pixmaps()
         self._refresh_overlay()
-        self.view._show_slice()
 
     def _on_opacity_changed(self, value: int):
         self.view.set_overlay_opacity(value / 100.0)
@@ -724,7 +659,6 @@ class FETQtViewer(QtWidgets.QMainWindow):
         self._tbr_vmax = hi
         self._build_pixmaps()
         self._refresh_overlay()
-        self.view._show_slice()
 
     def _on_slice_changed(self, z: int):
         self._cur_z = z
