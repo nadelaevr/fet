@@ -212,6 +212,13 @@ class FETQtViewer(QtWidgets.QMainWindow):
             tp = [20.0, 40.0, 60.0]
         self.time_points = tp
 
+        # For dynamic with --sig-time-from: only show late frames in curves
+        self._sig_time_from = params.get("sig_time_from_min", 0.0)
+        if self.mode == "dynamic" and self._sig_time_from > 0:
+            self._late_mask = np.array(tp) >= self._sig_time_from
+        else:
+            self._late_mask = None
+
         if self.mode == "dynamic":
             # Try loading 4D TBR for interactive curves
             tbr_4d_path = os.path.join(output_dir, "tbr_4d.nii.gz")
@@ -537,17 +544,25 @@ class FETQtViewer(QtWidgets.QMainWindow):
         print(f"  Click: PET=({vx},{vy},{vz}) display=({dx},{dy}) cluster={cluster} tbr={tbr_vals}")
         label_map = {1: "Rising", 2: "Falling", 3: "Plateau", 0: "Background"}
 
+        # Apply late-frame mask for display (matches slope/classification window)
+        if self._late_mask is not None and len(tbr_vals) == len(self._late_mask):
+            show_tp = list(np.array(self.time_points)[self._late_mask])
+            show_tbr = list(np.array(tbr_vals)[self._late_mask])
+        else:
+            show_tp = self.time_points
+            show_tbr = list(tbr_vals)
+
         for txt in list(self.ax.texts):
             txt.remove()
 
-        self.curve_line.set_data(self.time_points, list(tbr_vals))
-        ymax = max(float(tbr_vals.max()) * 1.3, 2.0)
+        self.curve_line.set_data(show_tp, show_tbr)
+        ymax = max(float(np.max(show_tbr)) * 1.3, 2.0)
         self.ax.set_ylim(0, ymax)
 
         # Annotate: first 3 + last point (avoid clutter with many frames)
-        idxs = [0, 1, 2] if len(tbr_vals) <= 3 else [0, len(tbr_vals) // 2, -1]
+        idxs = [0, 1, 2] if len(show_tbr) <= 3 else [0, len(show_tbr) // 2, -1]
         for i in idxs:
-            t, v = self.time_points[i], tbr_vals[i]
+            t, v = show_tp[i], show_tbr[i]
             self.ax.annotate(f"{v:.2f}", (t, v),
                              textcoords="offset points", xytext=(0, 12),
                              ha="center", fontsize=10, fontweight="bold",

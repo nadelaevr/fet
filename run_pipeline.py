@@ -517,11 +517,32 @@ def run_dynamic(args):
     print("Slope map and curve classification")
     print("-" * 60)
 
-    slope_map = compute_slope_map_dynamic(tbr_4d, time_points_min)
-    tbrmax = compute_tbrmax_dynamic(tbr_4d)
+    # If --sig-time-from is set, compute slope only on late frames too.
+    # Early frames (bolus/distribution phase) distort linear regression:
+    # a tumor with falling TBR (20-60 min) gets an early peak (0-10 min)
+    # that cancels the slope → misclassified as plateau.
+    if args.sig_time_from > 0:
+        late = time_points_min >= args.sig_time_from
+        n_late = int(np.sum(late))
+        if n_late >= 3:
+            print(f"  Slope: {n_late} frames >= {args.sig_time_from} min "
+                  f"(bolus excluded from regression)")
+            slope_map = compute_slope_map_dynamic(
+                tbr_4d[:, :, :, late], time_points_min[late])
+            tbrmax = compute_tbrmax_dynamic(tbr_4d[:, :, :, late])
+            slope_time_min = time_points_min[late]
+        else:
+            print(f"  Slope: too few late frames ({n_late}), using all")
+            slope_map = compute_slope_map_dynamic(tbr_4d, time_points_min)
+            tbrmax = compute_tbrmax_dynamic(tbr_4d)
+            slope_time_min = time_points_min
+    else:
+        slope_map = compute_slope_map_dynamic(tbr_4d, time_points_min)
+        tbrmax = compute_tbrmax_dynamic(tbr_4d)
+        slope_time_min = time_points_min
 
-    # For dynamic: time_span is total duration in minutes
-    time_span_min = time_points_min[-1] - time_points_min[0]
+    # time_span for classification matches the slope's time window
+    time_span_min = slope_time_min[-1] - slope_time_min[0]
     slope_thr = args.tbr_delta_threshold / time_span_min
 
     classes = classify_curves_dynamic(slope_map, args.tbr_delta_threshold, time_span_min)
