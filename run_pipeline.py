@@ -453,6 +453,7 @@ def run_dynamic(args):
         sul_4d_full, time_points_sec = trim_frames(
             sul_4d_full, time_points_sec.tolist(), args.no_frame
         )
+        time_points_sec = np.array(time_points_sec)
         time_points_min = time_points_sec / 60.0
         n_total_frames = sul_4d_full.shape[3]
         print(f"  After trimming: {n_total_frames} frames, "
