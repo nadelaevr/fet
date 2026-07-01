@@ -616,8 +616,8 @@ class FETQtViewer(QtWidgets.QMainWindow):
             win_layout.addWidget(self._t1_ref_label)
 
             right_layout.addWidget(win_group)
-            self._win_lo_spin.valueChanged.connect(self._on_window_changed)
-            self._win_hi_spin.valueChanged.connect(self._on_window_changed)
+            self._win_lo_spin.valueChanged.connect(lambda: self._on_window_changed())
+            self._win_hi_spin.valueChanged.connect(lambda: self._on_window_changed())
 
         # ── Opacity slider ──
         opacity_w = QtWidgets.QWidget()
@@ -673,8 +673,8 @@ class FETQtViewer(QtWidgets.QMainWindow):
             tbr_layout.addWidget(self._tbr_ref_label)
 
             right_layout.addWidget(tbr_group)
-            self._tbr_lo_spin.valueChanged.connect(self._on_tbrmax_window_changed)
-            self._tbr_hi_spin.valueChanged.connect(self._on_tbrmax_window_changed)
+            self._tbr_lo_spin.valueChanged.connect(lambda: self._on_tbrmax_window_changed())
+            self._tbr_hi_spin.valueChanged.connect(lambda: self._on_tbrmax_window_changed())
 
         # Legend
         legend_w = QtWidgets.QWidget()
