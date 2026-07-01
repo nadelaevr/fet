@@ -12,6 +12,7 @@ Usage (static — 3 timepoints):
 Usage (dynamic — 3 DICOM folders with 4D series):
     python run_pipeline.py --dynamic \\
         --dyn1 <folder_series1> --dyn2 <folder_series2> --dyn3 <folder_series3> \\
+        [--static-ref <folder_static>] \\
         [--t1 <folder_T1>] \\
         --output <output_folder>
 """
@@ -21,7 +22,7 @@ import os
 import time
 import numpy as np
 
-from dicom_reader import dicom_to_nifti, convert_bqml_to_sul
+from dicom_reader import dicom_to_nifti, convert_bqml_to_sul, _read_dicom_metadata
 from dicom_reader_dynamic import (
     dynamic_dicom_to_4d,
     convert_4d_bqml_to_sul,
@@ -67,6 +68,11 @@ def parse_args():
     parser.add_argument("--dyn2", default=None, help="DICOM folder: dynamic series 2")
     parser.add_argument("--dyn3", default=None, help="DICOM folder: dynamic series 3")
 
+    # Static reference for dynamic mode (tags may be incomplete in 4D series)
+    parser.add_argument("--static-ref", default=None,
+                        help="Static DICOM folder with complete patient/dose tags "
+                             "(used as fallback when dynamic series tags are missing)")
+
     # Common
     parser.add_argument("--t1", default=None, help="DICOM folder: T1-weighted MR")
     parser.add_argument("--output", "-o", required=True, help="Output folder")
@@ -107,6 +113,8 @@ def parse_args():
     else:
         if not (args.t20 and args.t40 and args.t60):
             parser.error("Static mode requires --t20, --t40, --t60")
+        if args.static_ref:
+            print("WARNING: --static-ref has no effect in static mode (ignored)")
 
     return args
 
@@ -115,6 +123,29 @@ def nib_aff2axcodes(affine):
     """Helper to get axis codes without full nibabel import at top."""
     import nibabel as nib
     return nib.aff2axcodes(affine)
+
+
+def _fill_meta_from_static(meta: dict, static_meta: dict) -> dict:
+    """Fill in missing patient/dose meta fields from a static reference.
+
+    Dynamic 4D series often have incomplete DICOM tags (no PatientSize,
+    PatientWeight). If a static series from the same scan session is
+    available, use it as a fallback for any zero/missing values.
+
+    Returns the same meta dict (mutated in-place) for convenience.
+    """
+    _FALLBACK_KEYS = [
+        "patient_weight_kg", "patient_height_m", "patient_height_cm",
+        "patient_sex", "injected_dose_bq",
+    ]
+    for key in _FALLBACK_KEYS:
+        current = meta.get(key)
+        if current is None or current == "" or (isinstance(current, (int, float)) and current <= 0):
+            fallback = static_meta.get(key)
+            if fallback is not None and fallback != "" and not (isinstance(fallback, (int, float)) and fallback <= 0):
+                meta[key] = fallback
+                print(f"  [static-ref] {key} <- {fallback}")
+    return meta
 
 
 # ===========================================================================
@@ -354,6 +385,15 @@ def run_dynamic(args):
     print("FET-PET/MRI Tyrosine Kinetics Analyzer  [DYNAMIC]")
     print("=" * 60)
 
+    # ---- Read static reference tags if provided (fallback for incomplete 4D tags) ----
+    static_ref_meta = None
+    if args.static_ref:
+        print(f"\nReading static-ref patient tags: {args.static_ref}")
+        static_ref_meta = _read_dicom_metadata(args.static_ref)
+        print(f"  weight={static_ref_meta.get('patient_weight_kg')} kg, "
+              f"height={static_ref_meta.get('patient_height_cm')} cm, "
+              f"dose={static_ref_meta.get('injected_dose_bq'):.2e} Bq")
+
     # ---- Step 1: Read 3 dynamic DICOM series ----
     dyn_folders = {"dyn1": args.dyn1, "dyn2": args.dyn2, "dyn3": args.dyn3}
     dyn_4d_volumes = []
@@ -369,6 +409,18 @@ def run_dynamic(args):
         print(f"  dcm2niix: shape={vol_4d.shape}, {time.time()-t0:.1f}s")
         print(f"  Orientation: {nib_aff2axcodes(aff)}")
         print(f"  N frames: {vol_4d.shape[3] if vol_4d.ndim == 4 else 1}")
+
+        # Fill in missing tags from static reference (dynamic 4D series often
+        # omit patient size/weight)
+        if static_ref_meta is not None:
+            has_issues = (
+                m.get("patient_weight_kg", 0) <= 0
+                or m.get("patient_height_cm", 0) <= 0
+                or m.get("injected_dose_bq", 0) <= 0
+            )
+            if has_issues:
+                print(f"  Missing tags in {label}, patching from --static-ref...")
+                _fill_meta_from_static(m, static_ref_meta)
 
         if meta is None:
             meta = m
