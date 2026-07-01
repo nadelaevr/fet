@@ -104,12 +104,26 @@ def _read_dicom_metadata(dicom_folder: str) -> dict:
     meta = {}
 
     # Patient
-    meta["patient_weight_kg"] = float(getattr(ds, "PatientWeight", 0.0))
+    raw_weight = float(getattr(ds, "PatientWeight", 0.0))
     try:
-        meta["patient_height_m"] = float(ds.PatientSize)
+        raw_height_m = float(ds.PatientSize)
     except (AttributeError, ValueError, TypeError):
-        meta["patient_height_m"] = 0.0
-    meta["patient_height_cm"] = meta["patient_height_m"] * 100.0
+        raw_height_m = 0.0
+
+    meta["patient_weight_kg"] = raw_weight
+    meta["patient_height_m"] = raw_height_m
+    meta["patient_height_cm"] = raw_height_m * 100.0
+
+    # Auto-detect swapped weight/height (common scanner bug: height in
+    # PatientWeight and weight in PatientSize). Heuristic:
+    #   weight > 150 kg AND height < 100 cm → swap.
+    if raw_weight > 150.0 and meta["patient_height_cm"] < 100.0:
+        meta["patient_weight_kg"] = meta["patient_height_cm"]   # was height
+        meta["patient_height_m"] = raw_weight / 100.0            # was weight
+        meta["patient_height_cm"] = raw_weight
+        print(f"  ⚠ Swapped weight/height: PatientWeight={raw_weight} → height, "
+              f"PatientSize={raw_height_m} → weight "
+              f"(now: {meta['patient_weight_kg']:.0f} kg, {meta['patient_height_cm']:.0f} cm)")
     try:
         meta["patient_sex"] = str(ds.PatientSex).upper()
     except AttributeError:
