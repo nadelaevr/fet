@@ -406,7 +406,9 @@ class FETQtViewer(QtWidgets.QMainWindow):
             # TBRmax overlay (vectorized)
             tbr_rgba = np.zeros((self._disp_ny, self._disp_nx, 4), dtype=np.uint8)
             tmax = max(float(np.max(tsl)) if np.any(tsl > 0) else 5.0, 1.0)
-            tnorm = np.clip(tsl / tmax, 0, 1)
+            tvmin = getattr(self, '_tbr_vmin', 0.0)
+            tvmax = getattr(self, '_tbr_vmax', tmax)
+            tnorm = np.clip((tsl - tvmin) / (tvmax - tvmin + 1e-9), 0, 1)
             # jet-like: 0→blue, .25→cyan, .5→green, .75→yellow, 1→red
             r = np.where(tnorm < 0.75, np.clip(tnorm / 0.75 * 255, 0, 255), 255)
             g = np.where(tnorm < 0.5, 255, np.where(tnorm < 0.75, 255, np.clip((1 - (tnorm - 0.75) / 0.25) * 255, 0, 255)))
@@ -421,10 +423,74 @@ class FETQtViewer(QtWidgets.QMainWindow):
             self._tbrmax_pixmaps.append(QtGui.QPixmap.fromImage(qimg3))
 
         self._cur_z = self.nz // 2
-
     def _apply_window(self):
+        """Rebuild pixmaps with updated window and refresh view."""
         self._build_pixmaps()
         self._refresh_overlay()
+
+    def _update_current_slice(self):
+        """Fast update: rebuild only current slice pixmaps."""
+        z = self._cur_z
+        tz = self._z_map[z] if self._z_map else z
+        sl = self._disp_underlay[:, :, tz]
+        csl_raw = self._disp_clusters[:, :, tz]
+        tsl_raw = self._disp_tbrmax[:, :, tz]
+
+        pos = sl[sl > 0]
+        if pos.size > 0:
+            vmin = np.percentile(pos, self._win_lo)
+            vmax = np.percentile(pos, self._win_hi)
+        else:
+            vmin, vmax = sl.min(), sl.max()
+        if vmax <= vmin:
+            vmin, vmax = sl.min(), sl.max()
+
+        disp_sl = np.flipud(np.fliplr(sl.T))
+        csl = np.flipud(np.fliplr(csl_raw.T))
+        tsl = np.flipud(np.fliplr(tsl_raw.T))
+
+        norm = np.clip((disp_sl - vmin) / (vmax - vmin) * 255, 0, 255).astype(np.uint8)
+        under_rgba = np.zeros((self._disp_ny, self._disp_nx, 4), dtype=np.uint8)
+        under_rgba[:, :, 0] = norm
+        under_rgba[:, :, 1] = norm
+        under_rgba[:, :, 2] = norm
+        under_rgba[:, :, 3] = 255
+        qimg = QtGui.QImage(under_rgba.tobytes(), self._disp_nx, self._disp_ny,
+                            self._disp_nx * 4, QtGui.QImage.Format_RGBA8888)
+        self._underlay_pixmaps[z] = QtGui.QPixmap.fromImage(qimg)
+
+        # Cluster overlay
+        over_rgba = np.zeros((self._disp_ny, self._disp_nx, 4), dtype=np.uint8)
+        for label, (r, g, b) in _CLUSTER_RGB.items():
+            mask = csl == label
+            over_rgba[mask, 0] = r
+            over_rgba[mask, 1] = g
+            over_rgba[mask, 2] = b
+            over_rgba[mask, 3] = 200
+        qimg2 = QtGui.QImage(over_rgba.tobytes(), self._disp_nx, self._disp_ny,
+                             self._disp_nx * 4, QtGui.QImage.Format_RGBA8888)
+        self._cluster_pixmaps[z] = QtGui.QPixmap.fromImage(qimg2)
+
+        # TBRmax overlay
+        tbr_rgba = np.zeros((self._disp_ny, self._disp_nx, 4), dtype=np.uint8)
+        tmax = max(float(np.max(tsl)) if np.any(tsl > 0) else 5.0, 1.0)
+        tvmin = getattr(self, '_tbr_vmin', 0.0)
+        tvmax = getattr(self, '_tbr_vmax', tmax)
+        tnorm = np.clip((tsl - tvmin) / (tvmax - tvmin + 1e-9), 0, 1)
+        r = np.where(tnorm < 0.75, np.clip(tnorm / 0.75 * 255, 0, 255), 255)
+        g = np.where(tnorm < 0.5, 255, np.where(tnorm < 0.75, 255, np.clip((1 - (tnorm - 0.75) / 0.25) * 255, 0, 255)))
+        b = np.where(tnorm < 0.25, 255, np.where(tnorm < 0.5, np.clip((1 - (tnorm - 0.25) / 0.25) * 255, 0, 255), 0))
+        a = np.where(tsl > 0, 200, 0)
+        tbr_rgba[:, :, 0] = r.astype(np.uint8)
+        tbr_rgba[:, :, 1] = g.astype(np.uint8)
+        tbr_rgba[:, :, 2] = b.astype(np.uint8)
+        tbr_rgba[:, :, 3] = a.astype(np.uint8)
+        qimg3 = QtGui.QImage(tbr_rgba.tobytes(), self._disp_nx, self._disp_ny,
+                             self._disp_nx * 4, QtGui.QImage.Format_RGBA8888)
+        self._tbrmax_pixmaps[z] = QtGui.QPixmap.fromImage(qimg3)
+
+        self._refresh_overlay()
+        self.view._show_slice()
 
     def _refresh_overlay(self):
         """Swap overlay pixmaps based on current tab."""
@@ -499,8 +565,8 @@ class FETQtViewer(QtWidgets.QMainWindow):
         # Voxel info panel
         self.voxel_info = QtWidgets.QLabel("Click a voxel for details.")
         self.voxel_info.setStyleSheet(
-            "font-size: 12px; padding: 8px; background: #f5f5f5; "
-            "border: 1px solid #ddd; border-radius: 4px;")
+            "font-size: 13px; padding: 10px; background: #f5f5f5; "
+            "border: 1px solid #ddd; border-radius: 4px; min-height: 120px;")
         self.voxel_info.setWordWrap(True)
         right_layout.addWidget(self.voxel_info)
 
@@ -511,18 +577,20 @@ class FETQtViewer(QtWidgets.QMainWindow):
             lo_row = QtWidgets.QHBoxLayout()
             lo_row.addWidget(QtWidgets.QLabel("Low%:"))
             self._win_lo_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-            self._win_lo_slider.setRange(0, 40)
+            self._win_lo_slider.setRange(0, 95)
             self._win_lo_slider.setValue(self._win_lo)
             self._win_lo_label = QtWidgets.QLabel(f"{self._win_lo}%")
+            self._win_lo_label.setFixedWidth(35)
             lo_row.addWidget(self._win_lo_slider)
             lo_row.addWidget(self._win_lo_label)
             win_layout.addLayout(lo_row)
             hi_row = QtWidgets.QHBoxLayout()
             hi_row.addWidget(QtWidgets.QLabel("High%:"))
             self._win_hi_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-            self._win_hi_slider.setRange(60, 100)
+            self._win_hi_slider.setRange(5, 100)
             self._win_hi_slider.setValue(self._win_hi)
             self._win_hi_label = QtWidgets.QLabel(f"{self._win_hi}%")
+            self._win_hi_label.setFixedWidth(35)
             hi_row.addWidget(self._win_hi_slider)
             hi_row.addWidget(self._win_hi_label)
             win_layout.addLayout(hi_row)
@@ -546,6 +614,36 @@ class FETQtViewer(QtWidgets.QMainWindow):
         self.opacity_label.setFixedWidth(35)
         opacity_l.addWidget(self.opacity_label)
         right_layout.addWidget(opacity_w)
+
+        # ── TBRmax Window controls ──
+        if self.tbrmax_vol is not None:
+            tbr_group = QtWidgets.QGroupBox("TBRmax Range")
+            tbr_layout = QtWidgets.QVBoxLayout(tbr_group)
+            tbr_lo_row = QtWidgets.QHBoxLayout()
+            tbr_lo_row.addWidget(QtWidgets.QLabel("Min:"))
+            self._tbr_lo_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+            self._tbr_lo_slider.setRange(0, 100)
+            self._tbr_lo_slider.setValue(0)
+            self._tbr_lo_label = QtWidgets.QLabel("0.0")
+            self._tbr_lo_label.setFixedWidth(35)
+            tbr_lo_row.addWidget(self._tbr_lo_slider)
+            tbr_lo_row.addWidget(self._tbr_lo_label)
+            tbr_layout.addLayout(tbr_lo_row)
+            tbr_hi_row = QtWidgets.QHBoxLayout()
+            tbr_hi_row.addWidget(QtWidgets.QLabel("Max:"))
+            self._tbr_hi_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+            self._tbr_hi_slider.setRange(0, 100)
+            self._tbr_hi_slider.setValue(100)
+            self._tbr_hi_label = QtWidgets.QLabel("5.0")
+            self._tbr_hi_label.setFixedWidth(35)
+            tbr_hi_row.addWidget(self._tbr_hi_slider)
+            tbr_hi_row.addWidget(self._tbr_hi_label)
+            tbr_layout.addLayout(tbr_hi_row)
+            right_layout.addWidget(tbr_group)
+            self._tbr_lo_slider.valueChanged.connect(self._on_tbrmax_window_changed)
+            self._tbr_hi_slider.valueChanged.connect(self._on_tbrmax_window_changed)
+            self._tbr_vmin = 0.0
+            self._tbr_vmax = 5.0
 
         # Legend
         legend_w = QtWidgets.QWidget()
@@ -572,17 +670,36 @@ class FETQtViewer(QtWidgets.QMainWindow):
         self._refresh_overlay()
 
     def _on_window_changed(self):
-        self._win_lo = self._win_lo_slider.value()
-        self._win_hi = self._win_hi_slider.value()
-        if self._win_lo >= self._win_hi:
+        lo = self._win_lo_slider.value()
+        hi = self._win_hi_slider.value()
+        # Swap if inverted (allow crossing for smooth UX)
+        if lo >= hi:
+            lo, hi = hi, lo
+        if hi - lo < 1:
             return
-        self._win_lo_label.setText(f"{self._win_lo}%")
-        self._win_hi_label.setText(f"{self._win_hi}%")
-        self._apply_window()
+        self._win_lo = lo
+        self._win_hi = hi
+        self._win_lo_label.setText(f"{lo}%")
+        self._win_hi_label.setText(f"{hi}%")
+        self._update_current_slice()
 
     def _on_opacity_changed(self, value: int):
         self.view.set_overlay_opacity(value / 100.0)
         self.opacity_label.setText(f"{value}%")
+
+    def _on_tbrmax_window_changed(self):
+        lo = self._tbr_lo_slider.value()
+        hi = self._tbr_hi_slider.value()
+        if lo >= hi:
+            lo, hi = hi, lo
+        if hi - lo < 1:
+            return
+        tmax = max(float(np.max(self._disp_tbrmax)), 0.1)
+        self._tbr_vmin = lo / 100.0 * tmax
+        self._tbr_vmax = hi / 100.0 * tmax
+        self._tbr_lo_label.setText(f"{self._tbr_vmin:.1f}")
+        self._tbr_hi_label.setText(f"{self._tbr_vmax:.1f}")
+        self._update_current_slice()
 
     def _on_slice_changed(self, z: int):
         self._cur_z = z
