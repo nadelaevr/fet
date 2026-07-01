@@ -105,6 +105,12 @@ def parse_args():
     parser.add_argument("--no-frame", type=int, default=0,
                         help="Skip first N frames in dynamic mode (default: 0)")
 
+    # Dynamic: significance mask time window
+    parser.add_argument("--sig-time-from", type=float, default=0.0,
+                        help="Only consider frames >= this time (min) for significance "
+                             "mask. Ignores bolus phase (0-15 min). Slope still uses all "
+                             "frames. (default: 0 = all frames)")
+
     args = parser.parse_args()
 
     if args.dynamic:
@@ -520,9 +526,22 @@ def run_dynamic(args):
 
     classes = classify_curves_dynamic(slope_map, args.tbr_delta_threshold, time_span_min)
 
-    # Build significant mask (matching static logic: max SUL, any TBR > threshold)
-    sul_max = np.max(sul_4d_proc, axis=3)
-    tbr_any_gt = np.any(tbr_4d > args.tbr_threshold, axis=3)
+    # Build significant mask (matching static logic: max SUL, any TBR > threshold).
+    # If --sig-time-from is set, restrict to late frames (skip bolus phase).
+    if args.sig_time_from > 0:
+        late = time_points_min >= args.sig_time_from
+        n_late = int(np.sum(late))
+        if n_late < 2:
+            print(f"  WARNING: --sig-time-from={args.sig_time_from} leaves only {n_late} frame(s), using all frames")
+            late = np.ones(len(time_points_min), dtype=bool)
+        else:
+            print(f"  Significance mask: {n_late} frames >= {args.sig_time_from} min "
+                  f"(ignoring {len(time_points_min) - n_late} bolus frames)")
+        sul_max = np.max(sul_4d_proc[:, :, :, late], axis=3)
+        tbr_any_gt = np.any(tbr_4d[:, :, :, late] > args.tbr_threshold, axis=3)
+    else:
+        sul_max = np.max(sul_4d_proc, axis=3)
+        tbr_any_gt = np.any(tbr_4d > args.tbr_threshold, axis=3)
     sig_mask = (sul_max > args.sul_threshold) & tbr_any_gt
 
     # Apply brain mask
@@ -567,6 +586,7 @@ def run_dynamic(args):
             "smoothing": not args.no_smoothing,
             "smooth_sigma": args.smooth_sigma,
             "no_frame": args.no_frame,
+            "sig_time_from_min": args.sig_time_from,
             "sul_threshold": args.sul_threshold,
             "tbr_threshold": args.tbr_threshold,
             "patient_weight_kg": meta["patient_weight_kg"],
