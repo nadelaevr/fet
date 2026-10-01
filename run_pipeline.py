@@ -106,6 +106,10 @@ def parse_args():
     # Preprocessing
     parser.add_argument("--no-skull-strip", action="store_true",
                         help="Disable skull-stripping")
+    parser.add_argument("--cord-mm", type=float, default=0.0,
+                        help="Extend the brain mask inferiorly from the brainstem "
+                             "along the cord (mm). Keeps a cervicomedullary tumor "
+                             "after skull-stripping. 0 disables (default)")
     parser.add_argument("--no-smoothing", action="store_true",
                         help="Disable smoothing")
     parser.add_argument("--smooth-sigma", type=float, default=1.0,
@@ -308,6 +312,7 @@ def run_static(args):
         apply_skull_strip=not args.no_skull_strip,
         apply_smoothing=not args.no_smoothing,
         smooth_sigma=args.smooth_sigma,
+        cord_extend_mm=args.cord_mm,
     )
     sul_t20, sul_t40, sul_t60 = processed
 
@@ -334,6 +339,7 @@ def run_static(args):
             "trim_percent": args.trim_percent,
             "min_cluster_size": args.min_cluster_size,
             "skull_strip": not args.no_skull_strip,
+            "cord_extend_mm": args.cord_mm,
             "t1_used": args.t1 is not None,
             "smoothing": not args.no_smoothing,
             "smooth_sigma": args.smooth_sigma,
@@ -616,6 +622,7 @@ def run_dynamic(args):
         apply_skull_strip=not args.no_skull_strip,
         apply_smoothing=not args.no_smoothing,
         smooth_sigma=args.smooth_sigma,
+        cord_extend_mm=args.cord_mm,
     )
 
     print(f"\n  After preprocessing:")
@@ -730,6 +737,7 @@ def run_dynamic(args):
             "trim_percent": args.trim_percent,
             "min_cluster_size": args.min_cluster_size,
             "skull_strip": not args.no_skull_strip,
+            "cord_extend_mm": args.cord_mm,
             "t1_used": args.t1 is not None,
             "smoothing": not args.no_smoothing,
             "smooth_sigma": args.smooth_sigma,
