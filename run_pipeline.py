@@ -7,6 +7,7 @@ Usage (static — 3 timepoints):
     python run_pipeline.py \\
         --t20 <folder_20min> --t40 <folder_40min> --t60 <folder_60min> \\
         [--t1 <folder_T1>] \\
+        [--motion-correct] \\
         --output <output_folder>
 
 Usage (dynamic — 3 DICOM folders with 4D series):
@@ -14,6 +15,7 @@ Usage (dynamic — 3 DICOM folders with 4D series):
         --dyn1 <folder_series1> --dyn2 <folder_series2> --dyn3 <folder_series3> \\
         [--static-ref <folder_static>] \\
         [--t1 <folder_T1>] \\
+        [--motion-correct] \\
         --output <output_folder>
 """
 
@@ -27,9 +29,17 @@ from dicom_reader_dynamic import (
     dynamic_dicom_to_4d,
     convert_4d_bqml_to_sul,
     build_dynamic_time_schedule,
+    dynamic_frame_durations,
+    DYNAMIC_REFERENCE_FRAMES,
     trim_frames,
 )
-from preprocess import preprocess_volumes, preprocess_4d
+from preprocess import preprocess_volumes, preprocess_4d, resample_to_pet
+from motion import (
+    correct_volumes,
+    align_volumes_to_target,
+    save_motion_report,
+    motion_report_summary,
+)
 from analysis import (
     trimmed_mean_numpy_only,
     compute_tbr_map,
@@ -100,6 +110,9 @@ def parse_args():
                         help="Disable smoothing")
     parser.add_argument("--smooth-sigma", type=float, default=1.0,
                         help="Smoothing sigma in voxels (default: 1.0)")
+    parser.add_argument("--motion-correct", action="store_true",
+                        help="Rigidly align PET frames to undo inter-frame "
+                             "head motion before kinetics. Writes motion.json")
 
     # Dynamic: frame trimming
     parser.add_argument("--no-frame", type=int, default=0,
@@ -154,8 +167,68 @@ def _fill_meta_from_static(meta: dict, static_meta: dict) -> dict:
     return meta
 
 
+def _apply_motion_correction(
+    volumes: list,
+    affine,
+    durations: list,
+    reference_indices: list,
+    labels: list,
+    output_dir: str,
+    t1_volume,
+    t1_affine,
+    time_sec=None,
+):
+    """Inter-frame rigid alignment, then one PET-reference to T1 pose.
+
+    Returns aligned volumes, the T1 array/affine to pass into preprocessing
+    (resampled onto the PET grid when a T1 was given), and the motion report.
+    The caller's native T1 array is left untouched.
+    """
+    print("\n" + "-" * 60)
+    print("Head-motion correction (rigid)")
+    print("-" * 60)
+
+    aligned, report = correct_volumes(
+        volumes,
+        affine,
+        durations,
+        reference_indices,
+        labels=labels,
+        time_sec=time_sec,
+    )
+    t1_pre, t1_pre_aff = t1_volume, t1_affine
+    if t1_volume is not None:
+        print("  Resampling T1 onto the PET grid")
+        t1_on_pet = resample_to_pet(
+            t1_volume, t1_affine,
+            pet_shape=aligned[0].shape,
+            pet_affine=affine,
+        )
+        print("  One rigid step: PET reference pose -> T1")
+        aligned, t1_info = align_volumes_to_target(
+            aligned,
+            affine,
+            t1_on_pet,
+            estimate_indices=reference_indices,
+            durations_sec=durations,
+        )
+        report["t1"] = t1_info
+        t1_pre, t1_pre_aff = t1_on_pet, affine
+        if t1_info.get("applied"):
+            print(
+                f"  T1 pose applied: cortical shift {t1_info['rim_mm']:.1f} mm, "
+                f"mask COM {t1_info['com_before_mm']} -> {t1_info['com_after_mm']} mm"
+            )
+        else:
+            print(f"  T1 pose not applied ({t1_info.get('reason')})")
+
+    path = save_motion_report(output_dir, report)
+    print(f"  {path}")
+    return aligned, t1_pre, t1_pre_aff, report
+
+
 # ===========================================================================
-# STATIC PIPELINE (unchanged logic)
+# STATIC PIPELINE
 # ===========================================================================
 
 def run_static(args):
@@ -203,6 +276,24 @@ def run_static(args):
         print(f"  dcm2niix: shape={t1_volume.shape}, {time.time()-t0:.1f}s")
         print(f"  Orientation: {nib_aff2axcodes(t1_affine)}")
 
+    # ---- Optional inter-frame head motion correction ----
+    # Native T1 is kept for t1_orig. Preprocessing receives the PET-grid T1
+    # when motion correction resampled it.
+    t1_pre, t1_pre_aff = t1_volume, t1_affine
+    motion_report = None
+    if args.motion_correct:
+        aligned, t1_pre, t1_pre_aff, motion_report = _apply_motion_correction(
+            [sul_volumes["t20"], sul_volumes["t40"], sul_volumes["t60"]],
+            affine,
+            [1200.0, 1200.0, 1200.0],
+            [1],
+            ["t20", "t40", "t60"],
+            args.output,
+            t1_volume,
+            t1_affine,
+        )
+        sul_volumes["t20"], sul_volumes["t40"], sul_volumes["t60"] = aligned
+
     # ---- Step 2: Preprocessing ----
     print("\n" + "-" * 60)
     print("Preprocessing (skull-strip + smoothing)")
@@ -212,8 +303,8 @@ def run_static(args):
     processed, brain_mask, t1_resampled = preprocess_volumes(
         sul_list,
         affine=affine,
-        t1_volume=t1_volume,
-        t1_affine=t1_affine,
+        t1_volume=t1_pre,
+        t1_affine=t1_pre_aff,
         apply_skull_strip=not args.no_skull_strip,
         apply_smoothing=not args.no_smoothing,
         smooth_sigma=args.smooth_sigma,
@@ -246,6 +337,7 @@ def run_static(args):
             "t1_used": args.t1 is not None,
             "smoothing": not args.no_smoothing,
             "smooth_sigma": args.smooth_sigma,
+            "motion_correct": args.motion_correct,
             "patient_weight_kg": meta["patient_weight_kg"],
             "patient_height_cm": meta["patient_height_cm"],
             "patient_sex": meta["patient_sex"],
@@ -341,6 +433,9 @@ def run_static(args):
         vox = mask_clusters == cid
         if np.any(vox):
             report["results"][f"mean_slope_{cname}"] = round(float(np.mean(slope_map[vox])), 6)
+
+    if motion_report is not None:
+        report["motion"] = motion_report_summary(motion_report)
 
     # ---- Step 5: Save ----
     print("\n" + "-" * 60)
@@ -454,6 +549,49 @@ def run_dynamic(args):
     print(f"  Time range: {time_points_sec[0]:.1f}s — {time_points_sec[-1]:.1f}s "
           f"({time_points_min[-1]:.1f} min)")
 
+    # T1 is read before motion correction. Inter-frame alignment uses the
+    # untrimmed 38-frame index of the 20–40 min block, then --no-frame crops.
+    t1_volume = None
+    t1_affine = None
+    if args.t1:
+        print(f"\nReading T1: {args.t1}")
+        t0 = time.time()
+        t1_raw, t1_affine, _ = dicom_to_nifti(args.t1)
+        t1_volume = t1_raw
+        print(f"  dcm2niix: shape={t1_volume.shape}, {time.time()-t0:.1f}s")
+        print(f"  Orientation: {nib_aff2axcodes(t1_affine)}")
+
+    t1_pre, t1_pre_aff = t1_volume, t1_affine
+    motion_report = None
+    if args.motion_correct:
+        if n_total_frames == 38 and len(time_points_sec) == 38:
+            durations = dynamic_frame_durations()
+            ref_lo, ref_hi = DYNAMIC_REFERENCE_FRAMES
+            ref_idx = list(range(ref_lo, ref_hi))
+            times = time_points_sec.tolist()
+        else:
+            print(f"  WARNING: {n_total_frames} frames (expected 38). "
+                  "Each frame is aligned to the middle of the series.")
+            durations = [60.0] * n_total_frames
+            lo = int(round(n_total_frames * 0.45))
+            hi = max(lo + 1, int(round(n_total_frames * 0.55)))
+            ref_idx = list(range(lo, hi))
+            times = None
+        vols = [sul_4d_full[:, :, :, t] for t in range(n_total_frames)]
+        labels = [f"f{t:02d}" for t in range(n_total_frames)]
+        vols, t1_pre, t1_pre_aff, motion_report = _apply_motion_correction(
+            vols,
+            affine,
+            durations,
+            ref_idx,
+            labels,
+            args.output,
+            t1_volume,
+            t1_affine,
+            time_sec=times,
+        )
+        sul_4d_full = np.stack(vols, axis=3)
+
     # Trim first N frames if requested
     if args.no_frame > 0:
         sul_4d_full, time_points_sec = trim_frames(
@@ -465,17 +603,6 @@ def run_dynamic(args):
         print(f"  After trimming: {n_total_frames} frames, "
               f"time range: {time_points_sec[0]:.1f}s — {time_points_sec[-1]:.1f}s")
 
-    # ---- Read T1 if provided ----
-    t1_volume = None
-    t1_affine = None
-    if args.t1:
-        print(f"\nReading T1: {args.t1}")
-        t0 = time.time()
-        t1_raw, t1_affine, _ = dicom_to_nifti(args.t1)
-        t1_volume = t1_raw
-        print(f"  dcm2niix: shape={t1_volume.shape}, {time.time()-t0:.1f}s")
-        print(f"  Orientation: {nib_aff2axcodes(t1_affine)}")
-
     # ---- Step 2: Preprocessing (4D) ----
     print("\n" + "-" * 60)
     print("Preprocessing 4D (skull-strip + smoothing)")
@@ -484,8 +611,8 @@ def run_dynamic(args):
     sul_4d_proc, brain_mask, t1_resampled = preprocess_4d(
         sul_4d_full,
         affine=affine,
-        t1_volume=t1_volume,
-        t1_affine=t1_affine,
+        t1_volume=t1_pre,
+        t1_affine=t1_pre_aff,
         apply_skull_strip=not args.no_skull_strip,
         apply_smoothing=not args.no_smoothing,
         smooth_sigma=args.smooth_sigma,
@@ -606,6 +733,7 @@ def run_dynamic(args):
             "t1_used": args.t1 is not None,
             "smoothing": not args.no_smoothing,
             "smooth_sigma": args.smooth_sigma,
+            "motion_correct": args.motion_correct,
             "no_frame": args.no_frame,
             "sig_time_from_min": args.sig_time_from,
             "sul_threshold": args.sul_threshold,
@@ -629,6 +757,9 @@ def run_dynamic(args):
         vox = mask_clusters == cid
         if np.any(vox):
             report["results"][f"mean_slope_{cname}"] = round(float(np.mean(slope_map[vox])), 6)
+
+    if motion_report is not None:
+        report["motion"] = motion_report_summary(motion_report)
 
     # ---- Step 5: Save ----
     print("\n" + "-" * 60)

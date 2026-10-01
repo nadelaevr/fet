@@ -179,6 +179,25 @@ def build_dynamic_time_schedule() -> list[float]:
     return times
 
 
+# Series 2 of the standard 38-frame schedule: 20–40 min, four 300 s frames.
+DYNAMIC_REFERENCE_FRAMES = (30, 34)
+
+
+def dynamic_frame_durations() -> list[float]:
+    """Frame durations in seconds, same order as build_dynamic_time_schedule()."""
+    durations = (
+        [5.0] * 12
+        + [10.0] * 6
+        + [20.0] * 3
+        + [60.0] * 5
+        + [180.0] * 4
+        + [300.0] * 4
+        + [300.0] * 4
+    )
+    assert len(durations) == 38, f"Expected 38 durations, got {len(durations)}"
+    return durations
+
+
 def trim_frames(sul_4d: np.ndarray, time_points_sec: list[float],
                 no_frame: int) -> tuple[np.ndarray, list[float]]:
     """
